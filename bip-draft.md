@@ -51,6 +51,16 @@ The protocol relies on URL fragments (#) for distributing the AES-GCM-256 decryp
 ### Why Ephemeral RAM State over Disk Storage?
 Unlike the persistent store-and-forward model of BIP 77, which writes encrypted payloads to a database, this protocol utilizes an ephemeral, RAM-only architecture. Participants are not strictly required to be online simultaneously. The relay holds the encrypted PSBT state in memory for a maximum of 24 hours. If a signer disconnects, they can seamlessly rejoin the room using the shared URI to establish a new WebSocket session and retrieve the current payload. Storing encrypted PSBTs on disk inherently introduces metadata storage risks. By enforcing a strict RAM-only policy where rooms self-destruct after 24 hours, upon explicit completion, or when the user closes the room, the relay removes many of the legal and security liabilities of persisting encrypted financial data.
 
+### Why a dedicated WebSocket Blind Relay instead of Nostr?
+Nostr is a robust, decentralized protocol well-suited for long-lived, discoverable events and has seen growing adoption in the Bitcoin ecosystem. However, its design prioritizes persistence and global replication so that users can fetch historical data from any relay.
+For real-time multisig PSBT coordination, this proposal deliberately chooses a different set of trade-offs:
+
+* **Ephemerality by default**: The Blind Relay is optimized for short-lived "forgetting" rather than long-term storage. Rooms exist only in volatile RAM with a hard maximum TTL of 24 hours (or explicit destruction upon completion). This minimizes the operational and legal surface of holding encrypted financial data, even temporarily. While specialized ephemeral Nostr relays exist, a purpose-built stateless WebSocket architecture makes strict RAM-only guarantees and automatic self-destruction simpler and more predictable for relay operators.
+* **Metadata minimization**: This protocol uses blinded fingerprints derived from the per-room FBEK, so the relay learns neither payload contents nor participant identities. Nostr's event model, while flexible, often exposes more structural metadata (e.g., pubkey relationships) to relays unless additional layering is applied.
+* **Performance for interactive ceremonies**: Complex N-of-M signing rounds—especially those involving dozens of inputs/outputs or 5–7 iterative passes—benefit from sub-second full-duplex updates and low-overhead binary-capable payloads. A dedicated WebSocket schema tailored to PSBT state synchronization provides this latency and efficiency with minimal ceremony, while remaining complementary to broader Nostr-based tools in the ecosystem.
+
+In short, Nostr excels at persistent, permissionless communication; this BIP focuses on a narrow, high-privacy, real-time coordination primitive that can coexist with (and potentially integrate into) the wider Nostr world if desired.
+
 ### Addressing Client Environment Concerns
 A common objection to web-based PSBT coordination is the risk of malicious browser extensions or compromised web environments. It is important to note that this BIP standardizes the transport protocol, not the client environment. While reference implementations may use Progressive Web Apps (PWAs), this WebSocket standard is designed to be natively integrated directly into desktop hardware wallet companions or mobile applications, entirely bypassing the browser environment if desired for maximum opsec.
 
@@ -63,10 +73,24 @@ All payloads and metadata MUST be encrypted client-side utilizing AES-GCM-256. D
 The coordination URI is the primary mechanism for sharing access to a session. It MUST follow a specific structure to allow clients to automatically extract connection parameters and the decryption key.
 
 #### Anatomy of the URI
-The URI consists of three mandatory components:
-* Base URL: The location of the API endpoint of the relay.
-* Room Identifier (roomId): A unique UUID (Version 4) path parameter that identifies the specific session.
-* Fragment-Based Encryption Key (FBEK): The 256-bit AES-GCM key, encoded as a URL-safe Base64 string, appended after the # character.
+This section is non-normative and provides a simplified overview of the coordination URI syntax. Please see the sections below for the normative requirements regarding fragment isolation and cryptographic blinding.
+
+##### URI format
+`<base_url>/room/<room_id>#<fbek>`
+
+* `[]` means optional, `< >` are placeholders
+* `<base_url>`: The HTTPS endpoint of the relay (e.g. `https://signingroom.io`)
+* `<room_id>`: A unique UUID (Version 4) identifying the specific session.
+* `<fbek>`: The 256-bit AES-GCM key, encoded as a URL-safe Base64 string.
+
+**Examples**
+A standard coordination link:
+`https://signingroom.io/room/123e4567-e89b-12d3-a456-426614174000#AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=`
+
+A link utilizing a self-hosted or local relay:
+`https://relay.my-node.local/room/550e8400-e29b-41d4-a716-446655440000#YmFzZTY0LWVuY29kZWQtMTI4LWJpdC1rZXk=`
+
+**Note**: This HTTPS URI is the shared entry point. Clients use this to derive the separate WebSocket (wss://) upgrade URI used for real-time coordination.
 
 #### Client Handling Requirements
 To prevent accidental key exposure to the relay infrastructure, compliant clients MUST adhere to the following:
@@ -242,7 +266,7 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
     "signatures": ["base64_encrypted_psbt"], 
     "isLocked": "boolean", 
     "auditLog": ["base64_encrypted_log_json"], 
-    "signerLabels": {"hex_fingerprint": "base64_encrypted_label"}, 
+    "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
     "whitelist": "base64_encrypted_array", 
     "encryptedFinalTxHex": "base64_encrypted_hex",
     "encryptedFinalTxId": "base64_encrypted_txid",
@@ -350,8 +374,9 @@ sequenceDiagram
     end
 ```
 
-#### Room Initialization (HTTP POST)
-To begin a session, the Coordinator MUST generate a local 256-bit AES-GCM key (FBEK). They then transmit a `POST` request to the relay's `/api/room` endpoint containing:
+#### Room Initialization
+To begin a session, the Coordinator MUST generate a local 256-bit AES-GCM key (FBEK). They then transmit a `POST` request to the relay's `/api/room` endpoint. Upon a successful initialization, the relay MUST return an HTTP 200 OK response with a JSON body containing the `roomId` and the relative `socketUrl` for the WebSocket upgrade.
+The request body MUST contain:
 * **roomId**: A unique UUID
 * **expectedPass**: The blinded Room Pass (Blind(roomId)).
 * **encryptedPsbt**: The base PSBT, encrypted with the FBEK.
@@ -363,10 +388,29 @@ To begin a session, the Coordinator MUST generate a local 256-bit AES-GCM key (F
 
 To ensure zero-knowledge, the relay MUST hash the `adminToken` using SHA-256 before storing it in state, ensuring the raw authentication string is never persisted.
 
-#### WebSocket Upgrade and Authentication
-Upon receiving a successful HTTP `200 OK` from the initialization, the Coordinator establishes a WebSocket connection using the `expectedPass`. Immediately after the connection is accepted and `STATE_SYNC` is received, the Coordinator MUST send an `AUTH` message.
+#### HTTP Status Codes 
+During the initial `POST /api/room` or the WebSocket upgrade request, the relay SHOULD return standard HTTP status codes:
+| Code | Label | Phase | Reason |
+| :--- | :--- | :--- | :--- |
+| **101** | Switching Protocols | Upgrade | Successful transition from HTTP to WebSocket. |
+| **200** | OK | POST | Room successfully initialized in RAM. |
+| **401** | Unauthorized | Upgrade | The `pass` parameter does not match the `expectedPass`. |
+| **413** | Payload Too Large | POST | The base PSBT exceeds the relay's maximum buffer (e.g., 2MB). |
+| **426** | Upgrade Required | Upgrade | The request did not include proper WebSocket upgrade headers. |
+| **429** | Too Many Requests | Both | The client's IP has exceeded rate or connection limits. |
 
-The relay hashes the incoming token and compares it to the stored hash. If successful, it promotes the session to `role: admin` and broadcasts a `ROLE_UPDATE`.
+#### WebSocket Upgrade and Authentication
+Once the Coordinator receives the HTTP 200 response, they establish a WebSocket connection. The relay MUST return an HTTP 101 Switching Protocols status to confirm the upgrade. Immediately after the connection is accepted and STATE_SYNC is received, the Coordinator MUST send an AUTH message. The relay hashes the incoming token and compares it to the stored hash. If successful, the relay promotes the session to role: `admin` and broadcasts a `ROLE_UPDATE`.
+
+#### WebSocket Status Codes
+To ensure cross-client compatibility, compliant relays MUST utilize the following WebSocket status codes when terminating a connection. Codes in the 4xxx range are utilized for protocol-specific errors. Relays SHOULD attempt to send a JSON error message before closing the socket to provide more context to the client UI.
+
+| Code | Label | Reason | Client Action |
+| :--- | :--- | :--- | :--- |
+| **1000** | Normal Closure or Locked | The room was closed or locked by the Coordinator or has naturally expired. | Stop. Notify user. |
+| **4001** | Room Full | The session has reached the maximum allowed concurrent connections (Default: 40). | Wait and retry. |
+| **4004** | Room Not Found | The roomId provided does not exist in the relay's volatile memory. | Stop. Verify URI. |
+| **4026** | Protocol Mismatch | The client's Major version is incompatible with the relay or the room's protocol version. | Stop. Update client app. |
 
 ### Guest Flow
 A Guest is any participant who joins a room via a shared URI to contribute a signature or monitor the coordination progress.
@@ -387,7 +431,6 @@ Upon a successful connection, the relay transmits a `STATE_SYNC` message contain
 
 #### Signature Contribution
 To contribute a signature to the room, the Guest client MUST perform the following steps locally:
-
 1. **Validation**: Parse the local signed PSBT and extract the cryptographic fingerprint of the signer.
 2. **Deduplication**: Verify the extracted fingerprint against the existing signature list in the decrypted room state. If a signature for this fingerprint already exists, the client MUST NOT proceed with the upload.
 3. **Encryption**: Encrypt the partial PSBT data using the FBEK and a unique Initialization Vector (IV/Nonce).
