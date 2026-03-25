@@ -25,8 +25,8 @@ To resolve this, this standard introduces a Blind Relay architecture. By utilizi
 Bitcoin multi-signature (N-of-M) coordination currently suffers from a Coordination Gap. While the security of signing devices has evolved rapidly, the process of passing Partially Signed Bitcoin Transactions (PSBTs) between signers remains a critical friction point for all users.
 
 Existing solutions force users into a binary choice, both of which are inadequate:
-1. Manual, Out-of-Band Transfers (USB drives, emails, secure messaging): Preserves privacy but introduces heavy operational friction, latency, and human error, making cross-device participation difficult.
-2. Stateful Coordination Servers: Centralized databases provide a seamless User Experience (UX) but act as privacy honeypots. They log sensitive metadata, IP addresses, quorum relationships, and often store PSBTs on disk. Furthermore, some platforms hold extended public keys (xpubs) to enforce vendor lock-in, or drift toward quasi-custodial models that inherently compromise the trustless security guarantees of the network.
+* Manual, Out-of-Band Transfers (USB drives, emails, secure messaging): Preserves privacy but introduces heavy operational friction, latency, and human error, making cross-device participation difficult.
+* Stateful Coordination Servers: Centralized databases provide a seamless User Experience (UX) but act as privacy honeypots. They log sensitive metadata, IP addresses, quorum relationships, and often store PSBTs on disk. Furthermore, some platforms hold extended public keys (xpubs) to enforce vendor lock-in, or drift toward quasi-custodial models that inherently compromise the trustless security guarantees of the network.
 
 The Bitcoin community has previously recognized the need for standardized, encrypted coordination. In 2023, BIP 77 (Async Payjoin) successfully introduced a directory-based standard for 2-party transactions, utilizing out-of-band URI sharing to establish encrypted routing. However, BIP 77 relies on an asynchronous store and forward architecture. The directory server must write encrypted payloads to disk until the receiver comes online. While sufficient for 1-to-1 Payjoin, storing multi-party payloads on disk introduces Directory Denial of Service (DoS) vectors and latency for iterative, real-time N-of-M signing rounds.
 
@@ -37,10 +37,14 @@ The motivation for this protocol is to establish a standard that:
 * Enforces Zero-Knowledge: The server cannot decrypt the data it relays. Decryption keys are shared strictly out-of-band or via URL fragments
 * Streamlines UX: Provides a web-standard URI for instant, cross-device participation, allowing hardware wallets and software clients to coordinate seamlessly.
 
+## Relation to Other BIPs
+
+This proposal builds directly on [BIP 174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki) (Partially Signed Bitcoin Transactions). It serves as a real-time, multi-party complement to [BIP 77](https://github.com/bitcoin/bips/blob/master/bip-0077.md) (Async Payjoin). While BIP 77 provides an asynchronous store-and-forward directory suitable for 2-party coordination, this BIP targets interactive N-of-M multisig ceremonies with strict ephemerality, zero persistent storage on the relay, and blinded zero-knowledge routing.
+
 ## Rationale
 
 ### Why WebSockets over HTTP Polling?
-While BIP 77 utilizes HTTP polling for its asynchronous directory, polling introduces significant overhead and latency. In a complex N-of-M multi-signature ceremony where participants may be actively filtering dozens of inputs/outputs or passing a PSBT through 5-7 signing rounds , sub-second latency is required and ensures the coordination is efficient for all users. Full-duplex WebSockets allow the relay to push payloads instantly to all connected clients without the overhead of continuous HTTP GET requests.
+While BIP 77 utilizes HTTP polling for its asynchronous directory, polling introduces significant overhead and latency. In a complex N-of-M multi-signature ceremony where participants may be actively filtering dozens of inputs/outputs or passing a PSBT through 5-7 signing rounds, sub-second latency is required and ensures the coordination is efficient for all users. Full-duplex WebSockets allow the relay to push payloads instantly to all connected clients without the overhead of continuous HTTP GET requests.
 
 ### Why a Central Relay instead of WebRTC (P2P)?
 An alternative design considered was utilizing WebRTC for true peer-to-peer (P2P) coordination. However, WebRTC inherently exposes the IP addresses of the participants to one another to establish the connection. In a multi-sig quorum where signers may not trust each other (e.g., two anonymous counterparties), IP leakage is a severe privacy flaw. A Blind Relay acts as a protective proxy, masking the peers' IP addresses from each other while remaining ignorant of the payload.
@@ -90,7 +94,7 @@ A standard coordination link:
 A link utilizing a self-hosted or local relay:
 `https://relay.my-node.local/room/550e8400-e29b-41d4-a716-446655440000#YmFzZTY0LWVuY29kZWQtMTI4LWJpdC1rZXk=`
 
-**Note**: This HTTPS URI is the shared entry point. Clients use this to derive the separate WebSocket (wss://) upgrade URI used for real-time coordination.
+**Note**: This HTTPS URI is the shared entry point. Clients MUST derive the WebSocket upgrade URI from the `<base_url>` (typically `wss://<base_url>/api/room/<room_id>/websocket`). The fragment (#<fbek>) MUST never be transmitted to the relay (per RFC 3986).
 
 #### Client Handling Requirements
 To prevent accidental key exposure to the relay infrastructure, compliant clients MUST adhere to the following:
@@ -103,6 +107,7 @@ To ensure the relay cannot harvest metadata from WebSocket routes or payload env
 
 The standard derivation function for blinded metadata is:
 `Blind(data) = SHA-256(data + FBEK)[0:16]` *(Truncated to the first 16 hexadecimal characters)*.
+**NOTE**: The truncation to the first 16 hexadecimal characters (8 bytes) is sufficient in this context because rooms are ephemeral and the number of signers per room is expected to be small.
 
 #### Room Authentication (The Blind Pass)
 To prevent unauthorized socket connections, the relay MUST require a pass parameter during the WebSocket upgrade. 
@@ -202,6 +207,40 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 ```
 
 #### Relay-to-Client Messages
+
+**SESSION_CONNECTED**: Sent by the relay immediately after the WebSocket handshake is accepted to provide the client with a temporary, room-specific identifier.
+```json
+{ 
+  "type": "SESSION_CONNECTED", 
+  "sessionId": "4_char_alphanumeric_string" 
+}
+```
+
+**STATE_SYNC**: The initial payload sent to every connecting client. **MUST NOT** include the `adminToken`. All metadata is strictly encrypted.
+```json
+{ 
+    "type": "STATE_SYNC", 
+    "roomId": "uuid_string", 
+    "network": "bitcoin|testnet|signet", 
+    "roomName": "base64_encrypted_room_name", 
+    "encryptedPsbt": "base64_encrypted_psbt", 
+    "signatures": ["base64_encrypted_psbt"], 
+    "isLocked": "boolean", 
+    "auditLog": ["base64_encrypted_log_json"], 
+    "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
+    "whitelist": "base64_encrypted_array", 
+    "encryptedFinalTxHex": "base64_encrypted_hex",
+    "encryptedFinalTxId": "base64_encrypted_txid",
+    "connectedCount": "number", 
+    "protocolVersion": "semver_string" 
+}
+```
+
+**ROLE_UPDATE**: Confirms a successful `AUTH` challenge.
+```json
+{ "type": "ROLE_UPDATE", "role": "admin" }
+```
+
 **CONNECTIONS_UPDATE**: Broadcast whenever a participant joins, leaves, or updates their display name.
 ```json
 { 
@@ -213,12 +252,9 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 }
 ```
 
-**ERROR / ERROR_LOCKED / ERROR_NOT_FOUND**: Relays MUST standardized error handling to disconnect unauthorized clients.
+**NEW_PARTIAL_DATA**: Broadcast to all participants when a signature is contributed.
 ```json
-{ 
-    "type": "ERROR", 
-    "message": "Payload too large (Max 2MB)" 
-}
+{ "type": "NEW_PARTIAL_DATA", "data": { "encryptedData": "base64_blob" }, "fingerprint": "hex_string" }
 ```
 
 **ROOM_RENAMED**: Broadcast when the Coordinator updates the session title.
@@ -255,39 +291,17 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 }
 ```
 
-**STATE_SYNC**: The initial payload sent to every connecting client. **MUST NOT** include the `adminToken`. All metadata is strictly encrypted.
-```json
-{ 
-    "type": "STATE_SYNC", 
-    "roomId": "uuid_string", 
-    "network": "bitcoin|testnet|signet", 
-    "roomName": "base64_encrypted_room_name", 
-    "encryptedPsbt": "base64_encrypted_psbt", 
-    "signatures": ["base64_encrypted_psbt"], 
-    "isLocked": "boolean", 
-    "auditLog": ["base64_encrypted_log_json"], 
-    "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
-    "whitelist": "base64_encrypted_array", 
-    "encryptedFinalTxHex": "base64_encrypted_hex",
-    "encryptedFinalTxId": "base64_encrypted_txid",
-    "connectedCount": "number", 
-    "protocolVersion": "semver_string" 
-}
-```
-
-**ROLE_UPDATE**: Confirms a successful `AUTH` challenge.
-```json
-{ "type": "ROLE_UPDATE", "role": "admin" }
-```
-
-**NEW_PARTIAL_DATA**: Broadcast to all participants when a signature is contributed.
-```json
-{ "type": "NEW_PARTIAL_DATA", "data": { "encryptedData": "base64_blob" }, "fingerprint": "hex_string" }
-```
-
 **ERROR_VERSION_MISMATCH**: Sent before closing the socket if the Major version is incompatible.
 ```json
 { "type": "ERROR_VERSION_MISMATCH", "roomVersion": "semver_string" }
+```
+
+**ERROR / ERROR_LOCKED / ERROR_NOT_FOUND**: Relays MUST use standardized error handling to disconnect unauthorized clients.
+```json
+{ 
+    "type": "ERROR", 
+    "message": "Payload too large (Max 2MB)" 
+}
 ```
 
 ### Coordinator Flow
@@ -421,20 +435,27 @@ The Guest client MUST extract the Fragment-Based Encryption Key (FBEK) from the 
 
 The Guest establishes a WebSocket connection to the relay's WebSocket endpoint. The client SHOULD include its protocol version in the connection string and the Blind Pass from the room authentication specification.
 
+#### Session Identification
+To facilitate UI coordination showing e.g. "Guest ABCD Joined", the relay assigns each connection a temporary sessionId. This ID allows participants to distinguish between different connections/sessions in the room and audit log without the relay or other peers learning the user's IP address or permanent identity. Upon a successful WebSocket upgrade, the relay MUST assign a transient, unique Session ID to the connection.
+* The sessionId MUST be generated by the relay using a random alphanumeric string (RECOMMENDED: 4 uppercase characters).
+* This identifier is ephemeral and tied strictly to the current WebSocket session. It MUST NOT be derived from the user's IP address, public keys, or any other persistent identifier.
+* Upon a successful upgrade, the relay transmits the `SESSION_CONNECTED` message before sending the `STATE_SYNC`.
+
+
 #### State Synchronization and Decryption
 
 Upon a successful connection, the relay transmits a `STATE_SYNC` message containing the room's current encrypted state. The Guest client MUST:
-1. Receive the `encryptedPsbt` (Base64) and the `signatures` array.
-2. Use the FBEK to decrypt the `encryptedPsbt` to obtain the master PSBT.
-3. Iteratively decrypt each blob in the `signatures` array.
-4. Merge all valid decrypted signatures into the master PSBT locally to provide a real-time view of the transaction's progress.
+* Receive the `encryptedPsbt` (Base64) and the `signatures` array.
+* Use the FBEK to decrypt the `encryptedPsbt` to obtain the master PSBT.
+* Iteratively decrypt each blob in the `signatures` array.
+* Merge all valid decrypted signatures into the master PSBT locally to provide a real-time view of the transaction's progress.
 
 #### Signature Contribution
 To contribute a signature to the room, the Guest client MUST perform the following steps locally:
-1. **Validation**: Parse the local signed PSBT and extract the cryptographic fingerprint of the signer.
-2. **Deduplication**: Verify the extracted fingerprint against the existing signature list in the decrypted room state. If a signature for this fingerprint already exists, the client MUST NOT proceed with the upload.
-3. **Encryption**: Encrypt the partial PSBT data using the FBEK and a unique Initialization Vector (IV/Nonce).
-4. **Transmission**: Send the `UPLOAD_PARTIAL` message to the relay, ensuring the fingerprint is properly blinded:
+* **Validation**: Parse the local signed PSBT and extract the cryptographic fingerprint of the signer.
+* **Deduplication**: Verify the extracted fingerprint against the existing signature list in the decrypted room state. If a signature for this fingerprint already exists, the client MUST NOT proceed with the upload.
+* **Encryption**: Encrypt the partial PSBT data using the FBEK and a unique Initialization Vector (IV/Nonce).
+* **Transmission**: Send the `UPLOAD_PARTIAL` message to the relay, ensuring the fingerprint is properly blinded:
 
 ```json
 { 
@@ -693,25 +714,17 @@ The protocol distinguishes between "Coordinators" and "Guests".
 * **Room Security**: The `adminToken` is encrypted with the FBEK before the initial upload. This ensures only the party possessing the fragment key can claim administrative control of the room.
 * **Role Hijacking Mitigation**: The relay MUST NOT include the adminToken in the STATE_SYNC payload sent to guests.
 * **Finalization Control**: Only the coordinator is permitted to send TX_FINALIZED messages, ensuring guests cannot prematurely declare completion or distribute potentially invalid final transactions.
+* **Brute Force Mitigation**: Relays SHOULD implement an authentication delay or lockout mechanism. If a client provides an invalid adminToken multiple times (RECOMMENDED: 5 attempts), the relay SHOULD lock the room's administrative functions for a cooldown period (RECOMMENDED: 30 minutes) to prevent brute-force discovery of the coordinator's token.
 
 ### Denial of Service (DoS) Protections
-Relay operators SHOULD implement multi-layered defense mechanisms to prevent resource exhaustion and ensure high availability for all participants.
+Relay operators SHOULD implement a multi-layered defense-in-depth strategy to ensure high availability and prevent resource exhaustion.
 
-#### Concurrent Connection Limits
-To prevent a single actor from monopolizing the Relay's capacity, the Relay MUST track and limit concurrent WebSocket connections on a per-IP basis.
-* **Tracking**: The Relay MUST extract the source IP (e.g., via the CF-Connecting-IP header) during the WebSocket upgrade request.
-* **Enforcement**: If the number of active connections from a single IP exceeds a defined threshold (RECOMMENDED: 10 connections per IP), the Relay MUST reject the upgrade with an HTTP 429 Too Many Requests response.
-* **Cleanup**: Upon WebSocket closure, the Relay MUST decrement the connection count for the associated IP to allow for new sessions.
-
-#### Message Rate Limiting
-In addition to connection limits, the Relay SHOULD enforce a message rate limit per session to prevent CPU and memory exhaustion from encrypted blob spam.
-* **Windowing**: The Relay SHOULD implement a sliding window (e.g., 1 second) to track the number of incoming messages per session.
-* **Threshold**: Sessions exceeding the message limit (RECOMMENDED: 10 messages per second) SHOULD have subsequent messages ignored or be disconnected.
-
-#### Payload Size Constraints
-To protect against memory-based attacks, the Relay MUST enforce a strict maximum size for any individual message or encrypted blob.
-* **Hard Limit**: The Relay MUST reject any message exceeding the maximum payload size (RECOMMENDED: 2,097,152 bytes or 2MB).
-* **Validation**: This check MUST occur before any processing or broadcasting of the data to other participants.
+* **Infrastructure-Layer Protection (WAF)**: Relays SHOULD utilize an edge-layer Web Application Firewall (WAF). This MUST include rate-limiting rules at the network edge to block malicious traffic and automated scrapers before they reach the application logic.
+* **Initialization Rate Limiting**: Relays SHOULD enforce strict limits on the POST /api/room endpoint (e.g., RECOMMENDED: 60 requests per minute per IP) to prevent "Room Flooding" attacks that exhaust RAM.
+* **Concurrent Connection Limits**: The Relay MUST track and limit concurrent WebSocket connections on a per-IP basis (RECOMMENDED: 10 connections per IP). If the limit is reached, subsequent upgrade requests SHOULD be rejected with an HTTP 429 status.
+* **Message Frequency Throttling**: Once a socket is established, the relay SHOULD enforce a per-session message rate limit (RECOMMENDED: 10 messages per second). Violations SHOULD result in the session being terminated with a 4008 Policy Violation status.
+* **Payload Size Constraints**: To protect against memory-based attacks, the Relay MUST enforce a strict maximum size for any individual message (RECOMMENDED: 2,097,152 bytes or 2MB).
+* **Origin Access Control (CORS)**: Relays MUST enforce strict Cross-Origin Resource Sharing (CORS) policies. In production environments, the Access-Control-Allow-Origin header SHOULD be restricted to authorized client domains to prevent cross-site request forgery and unauthorized API usage.
 
 #### Metadata Leakage
 While the transaction data is encrypted, participants should be aware that the relay can see connection metadata like public IP addresses and timing analysis of uploads. Users requiring higher privacy should access the relay via Tor or a VPN.
@@ -723,3 +736,4 @@ A fully functional, production-ready reference implementation of this stateless 
 
 ## Copyright
 This document is dual licensed as BSD 3-clause, and Creative Commons CC0 1.0 Universal.
+
