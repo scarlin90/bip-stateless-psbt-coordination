@@ -43,6 +43,11 @@ This proposal builds directly on [BIP 174](https://github.com/bitcoin/bips/blob/
 
 ## Rationale
 
+### Why AES-GCM-256 over ChaCha20-Poly1305?
+This proposal utilizes AES-GCM-256 for application-level payload encryption. While ChaCha20-Poly1305 is utilized in [BIP 324](https://github.com/bitcoin/bips/blob/master/bip-0324.mediawiki) for node-to-node transport obfuscation, the choice of AES-GCM is driven by the requirement for maximum ubiquity across user-facing platforms:
+* AES-GCM is a core primitive of the Web Crypto API, which is implemented natively and audited by browser vendors. Utilizing this native support allows browser-based and mobile clients to use secure, OS-level cryptographic providers rather than relying on external, unoptimized JavaScript-based libraries.
+* Because this protocol operates over HTTPS/WSS, the underlying TLS layer already provides the pseudorandom bytestream characteristics and transport-level obfuscation required for censorship resistance.
+
 ### Why WebSockets over HTTP Polling?
 While BIP 77 utilizes HTTP polling for its asynchronous directory, polling introduces significant overhead and latency. In a complex N-of-M multi-signature ceremony where participants may be actively filtering dozens of inputs/outputs or passing a PSBT through 5-7 signing rounds, sub-second latency is required and ensures the coordination is efficient for all users. Full-duplex WebSockets allow the relay to push payloads instantly to all connected clients without the overhead of continuous HTTP GET requests.
 
