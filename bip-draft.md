@@ -233,11 +233,28 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
     "isLocked": "boolean", 
     "auditLog": ["base64_encrypted_log_json"], 
     "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
-    "whitelist": "base64_encrypted_array", 
+    "whitelist": "base64_encrypted_array",
+    "participants": {
+      "session_id": {
+        "id": "session_id",
+        "role": "admin|guest",
+        "encryptedDisplayName": "base64_blob"
+      }
+    },
     "encryptedFinalTxHex": "base64_encrypted_hex",
     "encryptedFinalTxId": "base64_encrypted_txid",
     "connectedCount": "number", 
     "protocolVersion": "semver_string" 
+}
+```
+
+**PARTICIPANTS_UPDATE**: Broadcast to keep clients in sync with the historical and active roster of participants, ensuring comprehensive audit logs even if users disconnect.
+```json
+{
+  "type": "PARTICIPANTS_UPDATE",
+  "participants": {
+    "A1B2": { "id": "A1B2", "role": "admin", "encryptedDisplayName": "base64_blob" }
+  }
 }
 ```
 
@@ -329,8 +346,11 @@ sequenceDiagram
     S->>S: Hash adminToken for storage<br/>Allocate ephemeral RAM state (24h TTL max)
 
     A->>S: WebSocket connect (?pass=Blind Pass & v=1.0.0)
+    S->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S->>A: WebSocket: STATE_SYNC (encrypted PSBT + current state + initial auditLog)
+    
     A->>S: WebSocket: AUTH (encrypted adminToken)
+    S->>A: Broadcast: PARTICIPANTS_UPDATE (Alice upgraded to admin)
     S->>A: WebSocket: ROLE_UPDATE (role: "admin")
 
     Note over A,OOB: Critical privacy step:<br/>FBEK stays client-side (URL fragment #KEY)<br/>Never sent to server (per RFC 3986)
@@ -342,9 +362,14 @@ sequenceDiagram
     B->>B: Extract FBEK from URI fragment (locally)
     B->>B: Compute Blind Pass = SHA-256(roomId + FBEK)[0:16]
     B->>S: WebSocket connect (?pass=Blind Pass & v=1.0.0)
+    S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
+    S-->>B: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S->>B: WebSocket: STATE_SYNC (encrypted PSBT + signatures + full auditLog array)
 
     C->>S: Same WebSocket connect (parallel)
+    S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
+    S-->>B: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
+    S-->>C: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S->>C: WebSocket: STATE_SYNC
 
     B->>B: Decrypt PSBT, signatures & auditLog using FBEK<br/>(builds local verifiable audit trail)
@@ -637,6 +662,27 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
 }
 ```
 
+##### TX_FINALIZED
+* **participantName Plaintext**: "Charlie (Coldcard)"
+* **participantName IV (Hex)**: a8a9aaabacadaeafb0b1b2b3
+* **participantName Output (Base64)**: qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw==
+```json
+{
+  "type": "PARTICIPANTS_UPDATE",
+  "participants": {
+    "ABCD": {
+      "id": "ABCD",
+      "role": "admin",
+      "encryptedDisplayName": "qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw=="
+    },
+    "EFGH": {
+      "id": "EFGH",
+      "role": "guest"
+    }
+  }
+}
+```
+
 ### Message Payload Vectors (Relay-to-Client)
 
 The Relay acts strictly as an aggregator and router. It does not encrypt data. The STATE_SYNC and CONNECTIONS_UPDATE vectors below demonstrate how the server stores and broadcasts the exact opaque ciphertexts uploaded by the clients in the vectors above.
@@ -681,6 +727,17 @@ Demonstrates how the relay broadcasts the encryptedDisplayName without being abl
     "07877d968ee881d3": "GBkaGxwdHh8gISIjkojJaZC67eSRQZkvuALVzm565NRSdgpjQQ=="
   },
   "whitelist": "YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUE2i0D49jRXFoceme9jEc5lg==",
+  "participants": {
+    "ABCD": {
+      "id": "ABCD",
+      "role": "admin",
+      "encryptedDisplayName": "qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw=="
+    },
+    "EFGH": {
+      "id": "EFGH",
+      "role": "guest"
+    }
+  },
   "encryptedFinalTxHex": "hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqWXey3kNvNBd+69akuHxAmA==",
   "encryptedFinalTxId": "kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv9449uilLKrhojRGxMGj3mk=",
   "connectedCount": 2,
