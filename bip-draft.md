@@ -276,7 +276,7 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 
 **NEW_PARTIAL_DATA**: Broadcast to all participants when a signature is contributed.
 ```json
-{ "type": "NEW_PARTIAL_DATA", "data": { "encryptedData": "base64_blob" }, "fingerprint": "hex_string" }
+{ "type": "NEW_PARTIAL_DATA", "data": { "encryptedData": "base64_blob" }, "fingerprint": "hex_string", "sessionId": "4_char_alphanumeric_string" }
 ```
 
 **ROOM_RENAMED**: Broadcast when the Coordinator updates the session title.
