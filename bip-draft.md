@@ -120,10 +120,12 @@ To prevent unauthorized socket connections, the relay MUST require a pass parame
 * **Transmission:** Sent as a query parameter in the WebSocket URI.
 * **Example:** `wss://relay.example.com/api/room/<roomId>/websocket?v=1.0.0&pass=7dc1021170184a58`
 
-#### Signer Fingerprint Blinding
-Clients MUST NOT transmit raw BIP-32 hardware wallet fingerprints in plain text. Whenever a fingerprint is required for routing (e.g., uploading a signature), the client MUST blind it.
-* **Derivation:** `Blind(fingerprint)`
-* **Result:** The relay can route signature updates associated with a specific signer without ever knowing the signer's true master fingerprint.
+#### Routing Identifier Blinding (Fingerprints & Addresses)
+Clients MUST NOT transmit raw BIP-32 hardware wallet fingerprints or raw Bitcoin UTXO addresses in plain text to the relay. Whenever these identifiers are required for routing updates or state mapping (e.g., uploading a signature, or updating an alias dictionary), the client MUST blind them.
+
+* **Signer Derivation:** `Blind(fingerprint)`
+* **Address Derivation:** `Blind(address)`
+* **Result:** The relay can accurately route signature updates and maintain state dictionaries (such as `signerLabels` and `addressLabels`) without ever learning the true master fingerprints or the underlying UTXO destinations involved in the transaction.
 
 ### Message Schema
 All communication over the WebSocket MUST use a JSON-based message format. Every message MUST contain a type field. All sensitive payload data, including logs and room names, MUST be transmitted as opaque Base64-encoded strings encrypted via AES-GCM.
@@ -233,6 +235,7 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
     "isLocked": "boolean", 
     "auditLog": ["base64_encrypted_log_json"], 
     "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
+    "addressLabels": {"blinded_hex_address": "base64_encrypted_label"},
     "whitelist": "base64_encrypted_array",
     "participants": {
       "session_id": {
@@ -289,7 +292,12 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 { "type": "LABELS_UPDATED", "signerLabels": { "fingerprint": "base64_encrypted_label" } }
 ```
 
-**WHITELIST_UPDATED**: Broadcast when the address verification list is modified.
+**ADDRESS_LABELS_UPDATED**: Broadcast when signer aliases are added or modified.
+```json
+{ "type": "ADDRESS_LABELS_UPDATED", "addressLabels": { "blinded_hex_address": "base64_encrypted_label" } }
+```
+
+**WHITELIST_UPDATED**: Broadcast when UTXO address aliases are added or modified.
 ```json
 { "type": "WHITELIST_UPDATED", "encryptedWhitelist": "base64_encrypted_array" }
 ```
@@ -662,7 +670,7 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
 }
 ```
 
-##### TX_FINALIZED
+##### PARTICIPANTS_UPDATE
 * **participantName Plaintext**: "Charlie (Coldcard)"
 * **participantName IV (Hex)**: a8a9aaabacadaeafb0b1b2b3
 * **participantName Output (Base64)**: qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw==
@@ -680,6 +688,24 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
       "role": "guest"
     }
   }
+}
+```
+
+##### UPDATE_ADDRESS_LABEL
+* **address Plaintext**: "tb1qww078psjaee79gh0cfrqpf6gtzvxzk7gcfs869vnxtruhj6xj03qjfdnh8"
+* **address Output (Blinded)**: dae9a63e7eb0bfc8
+* **label Plaintext**: "Corporate Treasury"
+* **label IV (Hex)**: d8d9dadbdcdddedfe0e1e2e3
+* **label Output (Base64)**: 2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4Kun2VV54po1UHgck6Q064Q==
+* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Address Label Updated","detail":"Corporate Treasury (tb1qww07...)","user":"Coordinator"}
+* **encryptedLogBlob IV (Hex)**: e4e5e6e7e8e9eaebecedeeef
+* **encryptedLogBlob Output (Base64)**: 5OXm5+jp6uvs7e7vFiSypM13FyX4KGFl3KOodoc7v9ZvKyTh1S32Q3iUu/GQcs5CJXsJKzT4lFTncQCGwe7vHovEpUuwISMVSO+q1GB6qk9firEKHe69EVz0NbnAvU5Q/mgPfyvOnIQKY2ljKNVPzebj0YkDyIVVMfSyXwZDqcoVXhdRoVX0jfmQTfx62J+ERxfJLBJS3Js=
+```json
+{
+  "type": "UPDATE_ADDRESS_LABEL",
+  "blindedAddress": "dae9a63e7eb0bfc8",
+  "label": "2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4Kun2VV54po1UHgck6Q064Q==",
+  "encryptedLogBlob": "5OXm5+jp6uvs7e7vFiSypM13FyX4KGFl3KOodoc7v9ZvKyTh1S32Q3iUu/GQcs5CJXsJKzT4lFTncQCGwe7vHovEpUuwISMVSO+q1GB6qk9firEKHe69EVz0NbnAvU5Q/mgPfyvOnIQKY2ljKNVPzebj0YkDyIVVMfSyXwZDqcoVXhdRoVX0jfmQTfx62J+ERxfJLBJS3Js="
 }
 ```
 
@@ -725,6 +751,9 @@ Demonstrates how the relay broadcasts the encryptedDisplayName without being abl
   ],
   "signerLabels": {
     "07877d968ee881d3": "GBkaGxwdHh8gISIjkojJaZC67eSRQZkvuALVzm565NRSdgpjQQ=="
+  },
+  "addressLabels": {
+    "dae9a63e7eb0bfc8": "2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4Kun2VV54po1UHgck6Q064Q=="
   },
   "whitelist": "YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUE2i0D49jRXFoceme9jEc5lg==",
   "participants": {
