@@ -85,12 +85,13 @@ The coordination URI is the primary mechanism for sharing access to a session. I
 This section is non-normative and provides a simplified overview of the coordination URI syntax. Please see the sections below for the normative requirements regarding fragment isolation and cryptographic blinding.
 
 ##### URI format
-`<base_url>/room/<room_id>#<fbek>`
+`<base_url>/room/<room_id>[#[<fbek>][:<role_token>]]`
 
 * `[]` means optional, `< >` are placeholders
 * `<base_url>`: The HTTPS endpoint of the relay (e.g. `https://signingroom.io`)
 * `<room_id>`: A unique UUID (Version 4) identifying the specific session.
-* `<fbek>`: The 256-bit AES-GCM key, encoded as a URL-safe Base64 string.
+* `<fbek>`: (Optional in URI) The 256-bit AES-GCM key (Fragment-Based Encryption Key), encoded as a URL-safe Base64 string. If omitted from the URI, the client UI MUST prompt the user to supply it manually.
+* `<role_token>`: (Optional) A 32-character hexadecimal token representing the client's assigned capabilities.
 
 **Examples**
 A standard coordination link:
