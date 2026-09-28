@@ -349,7 +349,7 @@ sequenceDiagram
     Note over S: No persistent storage – 0 KB on disk<br/>All payloads relayed encrypted in RAM only
 
     A->>A: Generate 256-bit FBEK (locally)
-    A->>A: Derive Blind Pass = SHA-256(roomId + FBEK)[0:16]
+    A->>A: Derive Blind Pass = SHA-256(roomId + FBEK)
     A->>A: Encrypt base PSBT + adminToken (AES-GCM)
     A->>S: HTTP POST /api/room<br/>(roomId, encryptedPsbt, adminToken, expectedPass=Blind Pass)
     S->>S: Hash adminToken for storage<br/>Allocate ephemeral RAM state (24h TTL max)
@@ -362,18 +362,26 @@ sequenceDiagram
     S->>A: Broadcast: PARTICIPANTS_UPDATE (Alice upgraded to admin)
     S->>A: WebSocket: ROLE_UPDATE (role: "admin")
 
-    Note over A,OOB: Critical privacy step:<br/>FBEK stays client-side (URL fragment #KEY)<br/>Never sent to server (per RFC 3986)
+    A->>A: Define Guest Role limits (e.g. strict constraints)
+    A->>S: WebSocket: REGISTER_ROLE (tokenHash, canUpload, policyBlob)
 
-    A->>OOB: Share full URI:<br/>https://signingroom.io/room/{roomId}#FBEK<br/>(via Signal, Session, QR scan, etc.)
+    Note over A,OOB: Critical privacy step:<br/>FBEK & Role Token stay client-side (URL fragment)<br/>Never sent to server via HTTP (per RFC 3986)
+
+    A->>OOB: Share full URI: https://signingroom.io/room/{roomId}[hash-symbol]FBEK:RoleToken
     OOB->>B: Bob receives URI securely
     OOB->>C: Charlie receives same URI securely
 
-    B->>B: Extract FBEK from URI fragment (locally)
-    B->>B: Compute Blind Pass = SHA-256(roomId + FBEK)[0:16]
+    B->>B: Extract FBEK & Role Token from URI fragment
+    B->>B: Compute Blind Pass = SHA-256(roomId + FBEK)
     B->>S: WebSocket connect (?pass=Blind Pass & v=1.0.0)
     S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S-->>B: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S->>B: WebSocket: STATE_SYNC (encrypted PSBT + signatures + full auditLog array)
+
+    B->>S: WebSocket: AUTH_ROLE (RoleToken)
+    S->>S: Validate Token Hash
+    S->>B: WebSocket: CONSTRAINT_UPDATE (policyBlob)
+    B->>B: Decrypt policyBlob with FBEK & apply local UI constraints
 
     C->>S: Same WebSocket connect (parallel)
     S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
