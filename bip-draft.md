@@ -94,8 +94,11 @@ This section is non-normative and provides a simplified overview of the coordina
 * `<role_token>`: (Optional) A 32-character hexadecimal token representing the client's assigned capabilities.
 
 **Examples**
-A standard coordination link:
+A standard coordination link providing full decryption capability:
 `https://signingroom.io/room/123e4567-e89b-12d3-a456-426614174000#AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=`
+
+A restricted guest link providing decryption alongside a specific role token:
+`https://signingroom.io/room/123e4567-e89b-12d3-a456-426614174000#AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=:7483256acea64db3b3d0a38efd9104b5`
 
 A link utilizing a self-hosted or local relay:
 `https://relay.my-node.local/room/550e8400-e29b-41d4-a716-446655440000#YmFzZTY0LWVuY29kZWQtMTI4LWJpdC1rZXk=`
@@ -474,6 +477,7 @@ The request body MUST contain:
 * **protocolVersion**: The Semantic Version of the client.
 * **encryptedRoomName**: A default session title (e.g., "Untitled Room"), encrypted with the FBEK. Because AES-GCM enforces unique Initialization Vectors, the server cannot perform frequency analysis on this ciphertext.
 * **encryptedLogBlob**: The initial "Room Created" audit log.
+* **roleTokens**: A dictionary mapping hashed Role Tokens to their server-enforced capabilities and client-enforced `policyBlob` constraints. To enable strict Role-Based Access Control immediately upon creation, the Coordinator MUST provide a baseline default policy (e.g., a role token with all guest capabilities set to `true`) during initialization. Additional granular roles MAY be appended later via the `REGISTER_ROLE` message.
 
 To ensure zero-knowledge, the relay MUST hash the `adminToken` using SHA-256 before storing it in state, ensuring the raw authentication string is never persisted.
 
@@ -507,9 +511,12 @@ A Guest is any participant who joins a room via a shared URI to contribute a sig
 
 #### Connection and Handshake
 
-The Guest client MUST extract the Fragment-Based Encryption Key (FBEK) from the URL fragment (the portion of the URI following the `#` character). The client MUST NOT transmit this fragment to the relay in the HTTP request or WebSocket handshake.
+The Guest client MUST extract the Fragment-Based Encryption Key (FBEK) and the optional Role Token from the URL fragment (the portion of the URI following the `#` character). The client MUST NOT transmit this fragment to the relay in the HTTP request or WebSocket handshake.
 
 The Guest establishes a WebSocket connection to the relay's WebSocket endpoint. The client SHOULD include its protocol version in the connection string and the Blind Pass from the room authentication specification.
+
+* **Role Authentication**: If a Role Token was extracted from the URI, the client MUST transmit it to the relay via the `AUTH_ROLE` message immediately after receiving the `STATE_SYNC`. 
+* **Least Privilege Fallback**: If a Role Token is not present in the URI, the client UI MUST immediately default to a "least privilege" state (e.g., view-only access, disabling signature uploads, preventing PSBT exports, and masking identities) to ensure a fail-safe environment. The client remains in this restricted state unless a valid token is subsequently provided and verified via a `CONSTRAINT_UPDATE`.
 
 #### Session Identification
 To facilitate UI coordination showing e.g. "Guest ABCD Joined", the relay assigns each connection a temporary sessionId. This ID allows participants to distinguish between different connections/sessions in the room and audit log without other peers learning the user's IP address or permanent identity. Upon a successful WebSocket upgrade, the relay MUST assign a transient, unique Session ID to the connection.
@@ -881,6 +888,7 @@ The protocol distinguishes between "Coordinators" and "Guests".
 * **Role Hijacking Mitigation**: The relay MUST NOT include the `adminToken`, raw role tokens, or registered role constraints in the `STATE_SYNC` payload sent to clients. This ensures malicious actors cannot scrape active capability tokens from the initial room state to elevate their privileges.
 * **Finalization Control**: Only the coordinator is permitted to send TX_FINALIZED messages, ensuring guests cannot prematurely declare completion or distribute potentially invalid final transactions.
 * **Granular Role-Based Access Control (RBAC)**: Coordinators MAY define specific capability boundaries for guests via `REGISTER_ROLE`. The relay enforces hard structural limits (e.g., rejecting `UPLOAD_PARTIAL` if the role restricts it). The client independently enforces granular UI and privacy constraints (e.g., blurring UTXOs or restricting PDF downloads) by decrypting the associated `policyBlob`.
+* **Least Privilege Fallback**: Clients MUST enforce a least-privilege fallback if a valid role token is missing from the connection parameters.
 * **Brute Force Mitigation (IP Banning)**: Relays MUST implement an authentication lockout mechanism to prevent brute-force discovery of decryption keys or role tokens. If a client provides an invalid `adminToken` or `RoleToken` multiple times (RECOMMENDED: 5 attempts), the relay MUST drop the connection and temporarily ban the offending IP address (RECOMMENDED: 30 minutes). The relay MUST NOT lock the room itself, ensuring the session remains fully accessible to legitimate signers.
 
 ### Denial of Service (DoS) Protections
