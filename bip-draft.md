@@ -587,6 +587,31 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
 }
 ```
 
+##### REGISTER_ROLE
+* **roleToken Plaintext (Hex)**: "7483256acea64db3b3d0a38efd9104b5"
+* **tokenHash Output (SHA-256)**: 06b44d1facc4ea54da823bafc43f3358a6a52931238dde7c25c13d8e013db8d0
+* **policyBlob Plaintext JSON**: {"tokenId":"7483256a","canUploadSignature":true,"canExportPsbt":false,"canExportAudit":false,"canViewDetails":true,"canViewSigners":true,"canShareSession":false}
+* **policyBlob IV (Hex)**: f0f1f2f3f4f5f6f7f8f9fafb
+* **policyBlob Output (Base64)**: 8PHy8/T19vf4+fr7znmbfzpUQasQ5NUqAmiO894vWVxkdwcmw8Vy+wtXn+z66sVKrDu9ti2cYsW/tnT199TEGafAuMTyKb1CyP31/qBSfTrqG4hDo/d/1sRxlEJ4mrPvExafm7zfAdH/kgRwed7XCm/E3Q1DUYzgoiemj7FFyLXtLbHmm6KZgI4GALRib+F3WkpPazW3c9sXm6tsvOpPHZRKpk0ZEmfAzb24T31uA2IkRplixgemhBvI5+T4
+```json
+{
+  "type": "REGISTER_ROLE",
+  "tokenHash": "06b44d1facc4ea54da823bafc43f3358a6a52931238dde7c25c13d8e013db8d0",
+  "canUpload": true,
+  "policyBlob": "8PHy8/T19vf4+fr7znmbfzpUQasQ5NUqAmiO894vWVxkdwcmw8Vy+wtXn+z66sVKrDu9ti2cYsW/tnT199TEGafAuMTyKb1CyP31/qBSfTrqG4hDo/d/1sRxlEJ4mrPvExafm7zfAdH/kgRwed7XCm/E3Q1DUYzgoiemj7FFyLXtLbHmm6KZgI4GALRib+F3WkpPazW3c9sXm6tsvOpPHZRKpk0ZEmfAzb24T31uA2IkRplixgemhBvI5+T4"
+}
+```
+
+
+##### AUTH_ROLE
+* **token (Role Fragment)**: "7483256acea64db3b3d0a38efd9104b5"
+```json
+{
+  "type": "AUTH_ROLE",
+  "token": "7483256acea64db3b3d0a38efd9104b5"
+}
+```
+
 ##### UPLOAD_PARTIAL
 * **Fingerprint Plaintext**: af4b013d
 * **Fingerprint Output (Blinded)**: 07877d968ee881d3
@@ -772,7 +797,19 @@ Demonstrates how the relay broadcasts the encryptedDisplayName without being abl
 }
 ```
 
+##### CONSTRAINT_UPDATE
+Echoes the blind policy blob back to the authenticated client for decryption and UI enforcement.
+
+
+```json
+{
+  "type": "CONSTRAINT_UPDATE",
+  "policyBlob": "8PHy8/T19vf4+fr7znmbfzpUQasQ5NUqAmiO894vWVxkdwcmw8Vy+wtXn+z66sVKrDu9ti2cYsW/tnT199TEGafAuMTyKb1CyP31/qBSfTrqG4hDo/d/1sRxlEJ4mrPvExafm7zfAdH/kgRwed7XCm/E3Q1DUYzgoiemj7FFyLXtLbHmm6KZgI4GALRib+F3WkpPazW3c9sXm6tsvOpPHZRKpk0ZEmfAzb24T31uA2IkRplixgemhBvI5+T4"
+}
+```
+
 #### STATE_SYNC (Server-to-Client Aggregation)
+Note: adminToken and roleTokens are stripped from this payload before broadcasting
 ```json 
 {
   "type": "STATE_SYNC",
