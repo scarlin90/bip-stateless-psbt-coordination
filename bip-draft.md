@@ -141,6 +141,25 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 }
 ```
 
+**REGISTER_ROLE** (Admin Only): Generates a new capability boundary for guests. Includes canUpload for server-side enforcement and an encrypted policyBlob containing UI constraints (e.g. canExportPsbt, canViewSigners) enforced by the client.
+```json
+{
+  "type": "REGISTER_ROLE",
+  "tokenHash": "sha256_hash_of_role_token",
+  "canUpload": true,
+  "policyBlob": "base64_encrypted_policy_blob"
+}
+```
+
+**AUTH_ROLE**: Sent by a Guest to authenticate against specific capabilities defined by the Coordinator. The token is sent in plaintext, and the relay matches its SHA-256 hash.
+```json
+{
+  "type": "AUTH_ROLE",
+  "token": "7483256acea64db3b3d0a38efd9104b5"
+}
+```
+
+
 **UPLOAD_PARTIAL**: Sent by any participant to contribute a signed PSBT fragment. Includes a client-generated encrypted log event.
 ```json
 { 
@@ -221,6 +240,15 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 { 
   "type": "SESSION_CONNECTED", 
   "sessionId": "4_char_alphanumeric_string" 
+}
+```
+
+
+**CONSTRAINT_UPDATE**: Transmitted by the relay to a client immediately following a successful AUTH_ROLE challenge. The client decrypts the payload to enforce local UI constraints.
+```json
+{
+  "type": "CONSTRAINT_UPDATE",
+  "policyBlob": "base64_encrypted_policy_blob"
 }
 ```
 
