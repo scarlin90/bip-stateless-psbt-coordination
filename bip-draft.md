@@ -470,6 +470,7 @@ To ensure cross-client compatibility, compliant relays MUST utilize the followin
 | :--- | :--- | :--- | :--- |
 | **1000** | Normal Closure or Locked | The room was closed or locked by the Coordinator or has naturally expired. | Stop. Notify user. |
 | **4001** | Room Full | The session has reached the maximum allowed concurrent connections (Default: 40). | Wait and retry. |
+| **4003** | IP Banned | The client's IP address has been temporarily banned due to repeated authentication failures (Brute Force Protection). | Stop. Wait for cooldown. |
 | **4004** | Room Not Found | The roomId provided does not exist in the relay's volatile memory. | Stop. Verify URI. |
 | **4026** | Protocol Mismatch | The client's Major version is incompatible with the relay or the room's protocol version. | Stop. Update client app. |
 
@@ -812,9 +813,10 @@ The relay server acts as a "Blind Relay". Because the encryption key (FBEK) is s
 ### Authorization Boundaries
 The protocol distinguishes between "Coordinators" and "Guests".
 * **Room Security**: The `adminToken` is encrypted with the FBEK before the initial upload. This ensures only the party possessing the fragment key can claim administrative control of the room.
-* **Role Hijacking Mitigation**: The relay MUST NOT include the adminToken in the STATE_SYNC payload sent to guests.
+* **Role Hijacking Mitigation**: The relay MUST NOT include the `adminToken`, raw role tokens, or registered role constraints in the `STATE_SYNC` payload sent to clients. This ensures malicious actors cannot scrape active capability tokens from the initial room state to elevate their privileges.
 * **Finalization Control**: Only the coordinator is permitted to send TX_FINALIZED messages, ensuring guests cannot prematurely declare completion or distribute potentially invalid final transactions.
-* **Brute Force Mitigation**: Relays SHOULD implement an authentication delay or lockout mechanism. If a client provides an invalid adminToken multiple times (RECOMMENDED: 5 attempts), the relay SHOULD lock the room's administrative functions for a cooldown period (RECOMMENDED: 30 minutes) to prevent brute-force discovery of the coordinator's token.
+* **Granular Role-Based Access Control (RBAC)**: Coordinators MAY define specific capability boundaries for guests via `REGISTER_ROLE`. The relay enforces hard structural limits (e.g., rejecting `UPLOAD_PARTIAL` if the role restricts it). The client independently enforces granular UI and privacy constraints (e.g., blurring UTXOs or restricting PDF downloads) by decrypting the associated `policyBlob`.
+* **Brute Force Mitigation (IP Banning)**: Relays MUST implement an authentication lockout mechanism to prevent brute-force discovery of decryption keys or role tokens. If a client provides an invalid `adminToken` or `RoleToken` multiple times (RECOMMENDED: 5 attempts), the relay MUST drop the connection and temporarily ban the offending IP address (RECOMMENDED: 30 minutes). The relay MUST NOT lock the room itself, ensuring the session remains fully accessible to legitimate signers.
 
 ### Denial of Service (DoS) Protections
 Relay operators SHOULD implement a multi-layered defense-in-depth strategy to ensure high availability and prevent resource exhaustion.
