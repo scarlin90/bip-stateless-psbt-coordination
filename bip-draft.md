@@ -160,19 +160,26 @@ Clients MUST NOT transmit raw BIP-32 hardware wallet fingerprints or raw Bitcoin
 * **Result:** The relay can accurately route nonce and signature updates and maintain state dictionaries (such as `signerLabels` and `addressLabels`) without ever learning the true master fingerprints or the underlying UTXO destinations involved in the transaction.
 
 ### Message Schema
-All communication over the WebSocket MUST use a JSON-based message format. Every message MUST contain a type field. All sensitive payload data, including logs and room names, MUST be transmitted as opaque Base64-encoded strings encrypted via AES-GCM.
+All communication over the WebSocket MUST use a JSON-based message format. Every message MUST contain a `type` field. All sensitive payload data, including logs, labels, and room names, MUST be transmitted as opaque Base64-encoded strings encrypted via AES-GCM-256 with their corresponding field AAD.
 
 #### Client-to-Relay Messages
 
-**AUTH**: Sent by the Coordinator to claim administrative privileges. The token is an encrypted UUID.
+### Message Schema
+All communication over the WebSocket MUST use a JSON-based message format. Every message MUST contain a `type` field. All sensitive payload data, including logs, labels, and room names, MUST be transmitted as opaque Base64-encoded strings encrypted via AES-GCM-256 with their corresponding field AAD.
+
+#### Client-to-Relay Messages
+
+**AUTH**: Sent by the Coordinator to claim administrative privileges. The token is the Base64-encoded encrypted admin UUID (`encryptedAdminToken`), which the relay hashes with SHA-256 and compares against the stored hash.
 ```json
 { 
   "type": "AUTH", 
   "token": "base64_encrypted_admin_token" 
 }
+
 ```
 
-**REGISTER_ROLE** (Admin Only): Generates a new capability boundary for guests. Includes canUpload for server-side enforcement and an encrypted policyBlob containing UI constraints (e.g. canExportPsbt, canViewSigners) enforced by the client.
+**REGISTER_ROLE** (Admin Only): Generates a new capability boundary for guests. Includes `canUpload` for server-side enforcement and an encrypted `policyBlob` containing UI constraints (e.g. `canExportPsbt`, `canViewSigners`) enforced by the client.
+
 ```json
 {
   "type": "REGISTER_ROLE",
@@ -180,18 +187,44 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
   "canUpload": true,
   "policyBlob": "base64_encrypted_policy_blob"
 }
+
 ```
 
 **AUTH_ROLE**: Sent by a Guest to authenticate against specific capabilities defined by the Coordinator. The token is sent in plaintext, and the relay matches its SHA-256 hash.
+
 ```json
 {
   "type": "AUTH_ROLE",
   "token": "7483256acea64db3b3d0a38efd9104b5"
 }
+
 ```
 
+**UPLOAD_NONCE** (MuSig2 Round 1): Sent by any authorized participant in a `musig2` room to contribute a BIP 373 public nonce PSBT (`0x1b`). The relay enforces First-Writer-Wins slot ownership per `fingerprint` (subsequent updates to that slot MUST come from the same `sessionId` or an `admin`).
 
-**UPLOAD_PARTIAL**: Sent by any participant to contribute a signed PSBT fragment. Includes a client-generated encrypted log event.
+```json
+{ 
+  "type": "UPLOAD_NONCE", 
+  "fingerprint": "16_char_blinded_hex_string", 
+  "data": { "encryptedData": "base64_encrypted_nonce_psbt_blob" },
+  "encryptedLogBlob": "base64_encrypted_log_json"
+}
+
+```
+
+**PUBLISH_AGGREGATE_PSBT** (Admin Only, MuSig2 Round 2 Transition): Sent by the Coordinator once all Round 1 public nonces are collected and aggregated locally. Publishes the aggregated base PSBT to transition the room to Round 2 signing.
+
+```json
+{ 
+  "type": "PUBLISH_AGGREGATE_PSBT", 
+  "encryptedPsbt": "base64_encrypted_aggregate_psbt",
+  "encryptedLogBlob": "base64_encrypted_log_json"
+}
+
+```
+
+**UPLOAD_PARTIAL**: Sent by any authorized participant to contribute a signed PSBT fragment (standard BIP 174 signature or MuSig2 Round 2 partial signature `0x1c`). Includes a client-generated encrypted log event. Enforces First-Writer-Wins slot ownership per `fingerprint`.
+
 ```json
 { 
   "type": "UPLOAD_PARTIAL", 
@@ -199,9 +232,11 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
   "data": { "encryptedData": "base64_encrypted_psbt_blob" },
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
 ```
 
-**UPDATE_LABEL**: (Admin Only) Maps a blinded signer fingerprint to an encrypted alias.
+**UPDATE_LABEL**: (Admin Only) Maps a blinded signer fingerprint to an encrypted alias (bound with AAD `room:<roomId>|field:signer_label:<fingerprint>`).
+
 ```json
 { 
   "type": "UPDATE_LABEL", 
@@ -209,52 +244,76 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
   "label": "base64_encrypted_label",
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
 ```
 
-**SET_DISPLAY_NAME**: Any participant MAY self-identify with a display name. This MUST be encrypted with the FBEK to remain invisible to the relay.
+**UPDATE_ADDRESS_LABEL**: (Admin Only) Maps a blinded UTXO address to an encrypted alias (bound with AAD `room:<roomId>|field:address_label:<blindedAddress>`).
+
+```json
+{ 
+  "type": "UPDATE_ADDRESS_LABEL", 
+  "blindedAddress": "16_char_blinded_hex_string", 
+  "label": "base64_encrypted_label",
+  "encryptedLogBlob": "base64_encrypted_log_json"
+}
+
+```
+
+**SET_DISPLAY_NAME**: Any participant MAY self-identify with a display name. This MUST be encrypted with the FBEK (bound with AAD `room:<roomId>|field:display_name`) to remain invisible to the relay.
+
 ```json
 { 
   "type": "SET_DISPLAY_NAME", 
   "encryptedDisplayName": "base64_blob" 
 }
+
 ```
 
 **RENAME_ROOM**: (Admin Only) Updates the metadata title of the session.
+
 ```json
 { 
   "type": "RENAME_ROOM", 
   "encryptedName": "base64_encrypted_room_name",
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
 ```
 
-**TOGGLE_LOCK**: (Admin Only) Prevents new guests from joining the WebSocket session.
+**TOGGLE_LOCK**: (Admin Only) Prevents net-new guests from joining the WebSocket session while still allowing existing participants with a valid `resumeToken` to reconnect across network drops.
+
 ```json
 { 
   "type": "TOGGLE_LOCK", 
   "isLocked": true,
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
 ```
 
 **UPDATE_WHITELIST**: (Admin Only) Replaces the entire verified address list. Used for both single and batch approvals.
+
 ```json
 { 
   "type": "UPDATE_WHITELIST", 
   "encryptedWhitelist": "base64_encrypted_array",
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
 ```
 
-**LOG_ACTION**: Sent by clients to append a standalone event to the audit log (e.g., user joined, PSBT downloaded).
+**LOG_ACTION**: Sent by clients to append a standalone event to the audit log (e.g., user joined, PSBT downloaded). Relays MUST enforce a per-session guest quota (RECOMMENDED: 150 entries) and refuse new guest entries when the room log reaches capacity rather than evicting historical records.
+
 ```json
 { 
   "type": "LOG_ACTION", 
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
 ```
 
-**TX_FINALIZED**: (Admin Only) Transmits the resulting transaction hash and hex upon successful signature threshold.
+**TX_FINALIZED**: (Admin Only) Transmits the resulting transaction hash and hex upon reaching the signature threshold.
+
 ```json
 { 
   "type": "TX_FINALIZED", 
@@ -262,6 +321,17 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
   "encryptedFinalTxId": "base64_encrypted_txid",
   "encryptedLogBlob": "base64_encrypted_log_json"
 }
+
+```
+
+**CLOSE_ROOM**: (Admin Only) Instructs the relay to broadcast a final closure event, immediately purge all room state from storage, write a 1-hour anti-reuse tombstone, and terminate all active WebSocket connections.
+
+```json
+{ 
+  "type": "CLOSE_ROOM", 
+  "encryptedLogBlob": "base64_encrypted_log_json"
+}
+
 ```
 
 #### Relay-to-Client Messages
