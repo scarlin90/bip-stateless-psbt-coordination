@@ -79,7 +79,30 @@ A common objection to web-based PSBT coordination is the risk of malicious brows
 ## Specification
 
 ### Encryption Standard
-All payloads and metadata MUST be encrypted client-side utilizing AES-GCM-256. Decryption keys MUST be generated using a Cryptographically Secure Pseudorandom Number Generator (CSPRNG).
+All payloads and metadata MUST be encrypted client-side utilizing AES-GCM-256 with a 96-bit (12-byte) Initialization Vector (IV) and a 128-bit (16-byte) authentication tag. Decryption keys and IVs MUST be generated using a Cryptographically Secure Pseudorandom Number Generator (CSPRNG). All serialized ciphertexts MUST be encoded in Base64 as the concatenation of `IV (12 bytes) || Ciphertext || AuthTag (16 bytes)`.
+
+#### Additional Authenticated Data (AAD) Context Binding
+To prevent cross-room replay or cross-field ciphertext substitution on the relay, clients MUST bind each room ciphertext to its specific `roomId` and target field using UTF-8 encoded AES-GCM Additional Authenticated Data (`additionalData`):
+
+`AAD = "room:<roomId>|field:<fieldType>"`
+
+Compliant implementations MUST use the following normative `<fieldType>` identifiers:
+
+| Field Context | Normative `<fieldType>` String | Applied To |
+| :--- | :--- | :--- |
+| **Base / Aggregate PSBT** | `psbt` | `encryptedPsbt`, `transientPsbt`, `PUBLISH_AGGREGATE_PSBT` |
+| **MuSig2 Public Nonce** | `nonce` | `UPLOAD_NONCE`, `NEW_NONCE_DATA`, `STATE_SYNC.nonces` |
+| **Partial Signature** | `partial` | `UPLOAD_PARTIAL`, `NEW_PARTIAL_DATA`, `STATE_SYNC.signatures` |
+| **Room Title** | `room_name` | `encryptedRoomName`, `RENAME_ROOM`, `ROOM_RENAMED` |
+| **Signer Device Alias** | `signer_label:<blindedFingerprint>` | `UPDATE_LABEL`, `LABELS_UPDATED`, `STATE_SYNC.signerLabels` |
+| **UTXO Address Alias** | `address_label:<blindedAddress>` | `UPDATE_ADDRESS_LABEL`, `ADDRESS_LABELS_UPDATED`, `STATE_SYNC.addressLabels` |
+| **Participant Display Name** | `display_name` | `SET_DISPLAY_NAME`, `PARTICIPANTS_UPDATE`, `CONNECTIONS_UPDATE` |
+| **Verified Address Whitelist** | `whitelist` | `UPDATE_WHITELIST`, `WHITELIST_UPDATED`, `STATE_SYNC.whitelist` |
+| **Audit Log Entry** | `audit_log` | `encryptedLogBlob` across all commands and `LOG_UPDATE` |
+| **Finalized Transaction Hex** | `final_hex` | `TX_FINALIZED.encryptedFinalTxHex`, `TX_FINALIZED_BROADCAST` |
+| **Finalized Transaction ID** | `final_txid` | `TX_FINALIZED.encryptedFinalTxId`, `TX_FINALIZED_BROADCAST` |
+
+Additionally, before encrypting an `audit_log` entry, the client MUST embed the target `roomId` and a monotonically increasing per-session integer counter `seq` inside the plaintext JSON object (`{"timestamp":...,"seq":1,"roomId":"...","event":"...","detail":"...","user":"..."}`) and verify `entry.roomId` upon decryption.
 
 ### URI Scheme
 The coordination URI is the primary mechanism for sharing access to a session. It MUST follow a specific structure to allow clients to automatically extract connection parameters and the decryption key.
@@ -93,7 +116,7 @@ This section is non-normative and provides a simplified overview of the coordina
 * `[]` means optional, `< >` are placeholders
 * `<base_url>`: The HTTPS endpoint of the relay (e.g. `https://signingroom.io`)
 * `<room_id>`: A unique UUID (Version 4) identifying the specific session.
-* `<fbek>`: (Optional in URI) The 256-bit AES-GCM key (Fragment-Based Encryption Key), encoded as a URL-safe Base64 string. If omitted from the URI, the client UI MUST prompt the user to supply it manually.
+* `<fbek>`: (Optional in URI) The 256-bit AES-GCM key (Fragment-Based Encryption Key), encoded as a Base64 string. If omitted from the URI, the client UI MUST prompt the user to supply it manually.
 * `<role_token>`: (Optional) A 32-character hexadecimal token representing the client's assigned capabilities.
 
 **Examples**
@@ -106,33 +129,35 @@ A restricted guest link providing decryption alongside a specific role token:
 A link utilizing a self-hosted or local relay:
 `https://relay.my-node.local/room/550e8400-e29b-41d4-a716-446655440000#YmFzZTY0LWVuY29kZWQtMTI4LWJpdC1rZXk=`
 
-**Note**: This HTTPS URI is the shared entry point. Clients MUST derive the WebSocket upgrade URI from the `<base_url>` (typically `wss://<base_url>/api/room/<room_id>/websocket`). The fragment (#<fbek>) MUST never be transmitted to the relay (per RFC 3986).
+**Note**: This HTTPS URI is the shared entry point. Clients MUST derive the WebSocket upgrade URI from the `<base_url>` (typically `wss://<base_url>/api/room/<room_id>/websocket?v=2.0.0`). The fragment (`#<fbek>`) MUST never be transmitted to the relay (per RFC 3986).
 
 #### Client Handling Requirements
 To prevent accidental key exposure to the relay infrastructure, compliant clients MUST adhere to the following:
-* Fragment Isolation: The client MUST extract the FBEK locally from the window location fragment.
-* Non-Transmission: The FBEK MUST NOT be included in any HTTP headers, POST bodies, or WebSocket query parameters sent to the relay.
-* Persistence: If the client is a web browser, the FBEK SHOULD be stored only in volatile memory and never in persistent localStorage.
+* **Fragment Isolation**: The client MUST extract the FBEK locally from the window location fragment.
+* **Non-Transmission**: The FBEK MUST NOT be included in any HTTP headers, POST bodies, or WebSocket query parameters sent to the relay.
+* **Persistence**: If the client is a web browser, the FBEK and session resumption tokens SHOULD be stored only in volatile memory or tab-scoped `sessionStorage` and never in persistent `localStorage`.
 
-### Cryptographic Blinding (Zero-Knowledge Routing)
+### Cryptographic Blinding (Operator-Blind Routing)
 To ensure the relay cannot harvest metadata from WebSocket routes or payload envelopes, clients MUST deterministically "blind" identifiable metadata using the FBEK as a salt. 
 
 The standard derivation function for blinded metadata is:
 `Blind(data) = SHA-256(data + FBEK)[0:16]` *(Truncated to the first 16 hexadecimal characters)*.
 **NOTE**: The truncation to the first 16 hexadecimal characters (8 bytes) is sufficient in this context because rooms are ephemeral and the number of signers per room is expected to be small.
 
-#### Room Authentication (The Blind Pass)
-To prevent unauthorized socket connections, the relay MUST require a pass parameter during the WebSocket upgrade. 
+#### Room Authentication & Session Resumption (The Blind Pass)
+To prevent unauthorized socket connections, the relay MUST require a blinded room pass during the WebSocket upgrade. 
 * **Derivation:** `Blind(roomId)`
-* **Transmission:** Sent as a query parameter in the WebSocket URI.
-* **Example:** `wss://relay.example.com/api/room/<roomId>/websocket?v=1.0.0&pass=7dc1021170184a58`
+* **Transmission:** Sent via the `Sec-WebSocket-Protocol` request header during the WebSocket handshake as `pass.<Blind(roomId)>` alongside the protocol identifier `signingroom-v2`. If a returning participant is reconnecting to an existing session, they MAY also include `resume.<sessionId>.<resumeToken>` in the same header.
+* **Example Endpoint:** `wss://relay.example.com/api/room/123e4567-e89b-12d3-a456-426614174000/websocket?v=2.0.0`
+* **Example Header:** `Sec-WebSocket-Protocol: signingroom-v2, pass.f7d4f766ce529c98`
 
 #### Routing Identifier Blinding (Fingerprints & Addresses)
-Clients MUST NOT transmit raw BIP-32 hardware wallet fingerprints or raw Bitcoin UTXO addresses in plain text to the relay. Whenever these identifiers are required for routing updates or state mapping (e.g., uploading a signature, or updating an alias dictionary), the client MUST blind them.
+Clients MUST NOT transmit raw BIP-32 hardware wallet fingerprints or raw Bitcoin UTXO addresses in plain text to the relay. Whenever these identifiers are required for routing updates or state mapping (e.g., uploading a public nonce or signature, or updating an alias dictionary), the client MUST blind them.
 
 * **Signer Derivation:** `Blind(fingerprint)`
 * **Address Derivation:** `Blind(address)`
-* **Result:** The relay can accurately route signature updates and maintain state dictionaries (such as `signerLabels` and `addressLabels`) without ever learning the true master fingerprints or the underlying UTXO destinations involved in the transaction.
+* **Validation:** Relays MUST validate that all client-supplied blinded identifiers conform to a strict hexadecimal format (`/^[a-f0-9]{8,64}$/i`) before indexing state dictionaries.
+* **Result:** The relay can accurately route nonce and signature updates and maintain state dictionaries (such as `signerLabels` and `addressLabels`) without ever learning the true master fingerprints or the underlying UTXO destinations involved in the transaction.
 
 ### Message Schema
 All communication over the WebSocket MUST use a JSON-based message format. Every message MUST contain a type field. All sensitive payload data, including logs and room names, MUST be transmitted as opaque Base64-encoded strings encrypted via AES-GCM.
