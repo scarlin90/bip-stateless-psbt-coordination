@@ -557,21 +557,22 @@ The Coordinator (Admin) is the initiator of the coordination session. They are r
 sequenceDiagram
     participant A as Alice (Coordinator/Admin)
     participant OOB as Out-of-Band (Signal/Secure Messenger/QR/Email)
-    participant S as Blind Relay (Stateless RAM-only)
+    participant S as Blind Relay (Ephemeral State)
     participant B as Bob (Guest Signer)
     participant C as Charlie (Another Guest Signer)
 
-    Note over S: No persistent storage – 0 KB on disk<br/>All payloads relayed encrypted in RAM only
+    Note over S: Operator-blind ephemeral state<br/>All payloads relayed encrypted (24h TTL max)
 
     A->>A: Generate 256-bit FBEK (locally)
     A->>A: Derive Blind Pass = SHA-256(roomId + FBEK)
-    A->>A: Encrypt base PSBT + adminToken (AES-GCM)
-    A->>S: HTTP POST /api/room<br/>(roomId, encryptedPsbt, adminToken, expectedPass=Blind Pass)
-    S->>S: Hash adminToken for storage<br/>Allocate ephemeral RAM state (24h TTL max)
+    A->>A: Encrypt base PSBT (with AAD) + adminToken (AES-GCM)
+    A->>S: HTTP POST /api/room<br/>(roomId, encryptedPsbt, adminToken, expectedPass=Blind Pass, protocol)
+    S->>S: Validate bounds & hash adminToken (SHA-256)<br/>Allocate ephemeral room state (24h TTL max)
 
-    A->>S: WebSocket connect (?pass=Blind Pass & v=1.0.0)
+    A->>S: WebSocket connect (?v=2.0.0 | Sec-WebSocket-Protocol: signingroom-v2, pass.<BlindPass>)
+    S->>A: WebSocket: SESSION_CONNECTED (sessionId, resumeToken)
     S->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
-    S->>A: WebSocket: STATE_SYNC (encrypted PSBT + current state + initial auditLog)
+    S->>A: WebSocket: STATE_SYNC (encrypted PSBT + current state + hash-chained auditLog)
     
     A->>S: WebSocket: AUTH (encrypted adminToken)
     S->>A: Broadcast: PARTICIPANTS_UPDATE (Alice upgraded to admin)
@@ -582,16 +583,17 @@ sequenceDiagram
 
     Note over A,OOB: Critical privacy step:<br/>FBEK & Role Token stay client-side (URL fragment)<br/>Never sent to server via HTTP (per RFC 3986)
 
-    A->>OOB: Share full URI: https://signingroom.io/room/{roomId}[hash-symbol]FBEK:RoleToken
+    A->>OOB: Share full URI: [https://signingroom.io/room/](https://signingroom.io/room/){roomId}[hash-symbol]FBEK:RoleToken
     OOB->>B: Bob receives URI securely
     OOB->>C: Charlie receives same URI securely
 
     B->>B: Extract FBEK & Role Token from URI fragment
     B->>B: Compute Blind Pass = SHA-256(roomId + FBEK)
-    B->>S: WebSocket connect (?pass=Blind Pass & v=1.0.0)
+    B->>S: WebSocket connect (?v=2.0.0 | Sec-WebSocket-Protocol: signingroom-v2, pass.<BlindPass>)
+    S->>B: WebSocket: SESSION_CONNECTED (sessionId, resumeToken)
     S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S-->>B: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
-    S->>B: WebSocket: STATE_SYNC (encrypted PSBT + signatures + full auditLog array)
+    S->>B: WebSocket: STATE_SYNC (encrypted PSBT + signatures + hash-chained auditLog)
 
     B->>S: WebSocket: AUTH_ROLE (RoleToken)
     S->>S: Validate Token Hash
@@ -599,28 +601,44 @@ sequenceDiagram
     B->>B: Decrypt policyBlob with FBEK & apply local UI constraints
 
     C->>S: Same WebSocket connect (parallel)
+    S->>C: WebSocket: SESSION_CONNECTED (sessionId, resumeToken)
     S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S-->>B: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S-->>C: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
     S->>C: WebSocket: STATE_SYNC
 
-    B->>B: Decrypt PSBT, signatures & auditLog using FBEK<br/>(builds local verifiable audit trail)
+    B->>B: Decrypt PSBT, signatures & auditLog using FBEK + AAD<br/>(verifies SHA-256 chainHash across audit trail)
 
-    Note over B,C: Each participant decrypts & maintains their own copy of the audit log<br/>(via LOG_UPDATE broadcasts) → can generate PDF receipt locally
+    Note over B,C: Each participant decrypts & verifies the hash-chained audit log<br/>(via incremental LOG_UPDATE broadcasts) → can generate PDF receipt locally
     
     alt Optional: Admin locks the room to prevent new connections
         A->>S: WebSocket: TOGGLE_LOCK (admin only)
-        S->>S: Enforce entry restriction
+        S->>S: Enforce entry restriction (verified resumeToken still permitted)
         S->>A: Broadcast: LOCK_UPDATED (isLocked: true)
         S-->>B: Broadcast: LOCK_UPDATED
         S-->>C: Broadcast: LOCK_UPDATED
     end
 
-    B->>B: Apply local signature
-    B->>B: Encrypt partial PSBT update
-    B->>S: WebSocket: UPLOAD_PARTIAL<br/>(blinded fingerprint, encryptedData, optional encryptedLogBlob action)
+    alt Protocol is musig2: Round 1 Public Nonce Collection & Aggregation
+        B->>B: Generate BIP 373 public nonce (0x1b) & encrypt (AAD: nonce)
+        B->>S: WebSocket: UPLOAD_NONCE (blinded fingerprint, encryptedData, encryptedLogBlob)
+        S->>S: Enforce First-Writer-Wins slot ownership
+        S->>A: Broadcast: NEW_NONCE_DATA & incremental LOG_UPDATE
+        S-->>B: Broadcast: NEW_NONCE_DATA & incremental LOG_UPDATE
+        S-->>C: Broadcast: NEW_NONCE_DATA & incremental LOG_UPDATE
+        A->>A: Aggregate all Round 1 public nonces into PSBT & encrypt (AAD: psbt)
+        A->>S: WebSocket: PUBLISH_AGGREGATE_PSBT (admin only)
+        S->>A: Broadcast: AGGREGATE_PSBT_PUBLISHED
+        S-->>B: Broadcast: AGGREGATE_PSBT_PUBLISHED
+        S-->>C: Broadcast: AGGREGATE_PSBT_PUBLISHED
+    end
 
-    S->>A: Broadcast: NEW_PARTIAL_DATA
+    B->>B: Apply local signature (BIP 174 or MuSig2 Round 2 partial 0x1c)
+    B->>B: Encrypt partial PSBT update (AAD: partial)
+    B->>S: WebSocket: UPLOAD_PARTIAL<br/>(blinded fingerprint, encryptedData, encryptedLogBlob)
+
+    S->>S: Enforce First-Writer-Wins slot ownership
+    S->>A: Broadcast: NEW_PARTIAL_DATA & incremental LOG_UPDATE
     S-->>B: Broadcast: NEW_PARTIAL_DATA (to all connected)
     S-->>C: Broadcast: NEW_PARTIAL_DATA
 
@@ -632,7 +650,7 @@ sequenceDiagram
 
     alt Signature threshold met (admin detects locally)
         A->>A: Finalize PSBT locally → extract tx hex & txid
-        A->>A: Encrypt final hex/txid + optional final log entry
+        A->>A: Encrypt final hex/txid (with AAD) + final log entry
         A->>S: WebSocket: TX_FINALIZED (admin-only message)<br/>(encryptedFinalTxHex, encryptedFinalTxId, encryptedLogBlob)
         S->>A: Broadcast: TX_FINALIZED_BROADCAST
         S-->>B: Broadcast: TX_FINALIZED_BROADCAST (to all connected)
@@ -644,50 +662,61 @@ sequenceDiagram
 
     alt Optional: Coordinator closes room early
         A->>S: WebSocket: CLOSE_ROOM (admin only)
-        S->>S: Immediate RAM wipe & disconnect all
+        S->>S: Broadcast ROOM_CLOSED, storage.deleteAll(), write 1h Tombstone & disconnect all
     else TTL or natural end
-        Note over S: Auto-destruct after 24h or inactivity
+        Note over S: Auto-destruct after 24h TTL (writes 1h Tombstone before final purge)
     end
+
 ```
 
 #### Room Initialization
+
 To begin a session, the Coordinator MUST generate a local 256-bit AES-GCM key (FBEK). They then transmit a `POST` request to the relay's `/api/room` endpoint. Upon a successful initialization, the relay MUST return an HTTP 200 OK response with a JSON body containing the `roomId` and the relative `socketUrl` for the WebSocket upgrade.
-The request body MUST contain:
-* **roomId**: A unique UUID
-* **expectedPass**: The blinded Room Pass (Blind(roomId)).
-* **encryptedPsbt**: The base PSBT, encrypted with the FBEK.
-* **adminToken**: An encrypted UUID used to prove ownership.
-* **network**: The Bitcoin network context (mainnet, testnet, signet).
-* **protocolVersion**: The Semantic Version of the client.
-* **encryptedRoomName**: A default session title (e.g., "Untitled Room"), encrypted with the FBEK. Because AES-GCM enforces unique Initialization Vectors, the server cannot perform frequency analysis on this ciphertext.
-* **encryptedLogBlob**: The initial "Room Created" audit log.
+The request body MUST contain (and the relay MUST validate presence, type, and length bounds before initializing):
+
+* **roomId**: A unique UUID (8–64 characters).
+* **expectedPass**: The blinded Room Pass (`Blind(roomId)`, 16–128 characters).
+* **encryptedPsbt**: The base PSBT, encrypted with the FBEK under AAD `room:<roomId>|field:psbt` (≥16 characters).
+* **adminToken**: An encrypted UUID used to prove ownership (24–512 characters).
+* **network**: The Bitcoin network context (`bitcoin`, `testnet`, `signet`).
+* **protocol**: (Optional) The signing ceremony protocol (`standard` or `musig2`, defaulting to `standard`).
+* **protocolVersion**: The Semantic Version of the client (e.g., `2.0.0`).
+* **encryptedRoomName**: A default session title (e.g., "Untitled Room"), encrypted with the FBEK under AAD `room:<roomId>|field:room_name`. Because AES-GCM enforces unique Initialization Vectors, the server cannot perform frequency analysis on this ciphertext.
+* **encryptedLogBlob**: The initial "Room Created" audit log encrypted under AAD `room:<roomId>|field:audit_log`.
 * **roleTokens**: A dictionary mapping hashed Role Tokens to their server-enforced capabilities and client-enforced `policyBlob` constraints. To enable strict Role-Based Access Control immediately upon creation, the Coordinator MUST provide a baseline default policy (e.g., a role token with all guest capabilities set to `true`) during initialization. Additional granular roles MAY be appended later via the `REGISTER_ROLE` message.
 
-To ensure zero-knowledge, the relay MUST hash the `adminToken` using SHA-256 before storing it in state, ensuring the raw authentication string is never persisted.
+To maintain an operator-blind posture, the relay MUST hash the `adminToken` using SHA-256 before storing it in state, ensuring the raw authentication string is never persisted.
 
-#### HTTP Status Codes 
+#### HTTP Status Codes
+
 During the initial `POST /api/room` or the WebSocket upgrade request, the relay SHOULD return standard HTTP status codes:
+
 | Code | Label | Phase | Reason |
-| :--- | :--- | :--- | :--- |
+| --- | --- | --- | --- |
 | **101** | Switching Protocols | Upgrade | Successful transition from HTTP to WebSocket. |
-| **200** | OK | POST | Room successfully initialized in RAM. |
-| **401** | Unauthorized | Upgrade | The `pass` parameter does not match the `expectedPass`. |
-| **413** | Payload Too Large | POST | The base PSBT exceeds the relay's maximum buffer (e.g., 2MB). |
+| **200** | OK | POST | Room successfully initialized in ephemeral state. |
+| **400** | Bad Request | POST | Missing, malformed, or out-of-bounds `roomId`, `expectedPass`, `adminToken`, or `encryptedPsbt`. |
+| **401** | Unauthorized | Both | The `pass.<BlindPass>` subprotocol does not match `expectedPass`, or an invalid `adminToken` was provided on room reset. |
+| **403** | Forbidden | Upgrade | Cross-Origin WebSocket access forbidden (Origin check failed). |
+| **410** | Gone | POST | The `roomId` was previously closed or expired and holds an active 1-hour anti-reuse tombstone. |
+| **413** | Payload Too Large | POST | The request body exceeds the relay's maximum buffer (e.g., 2MB). |
 | **426** | Upgrade Required | Upgrade | The request did not include proper WebSocket upgrade headers. |
-| **429** | Too Many Requests | Both | The client's IP has exceeded rate or connection limits. |
+| **429** | Too Many Requests | Both | The client's IP has exceeded HTTP rate limits or concurrent connection limits. |
 
 #### WebSocket Upgrade and Authentication
-Once the Coordinator receives the HTTP 200 response, they establish a WebSocket connection. The relay MUST return an HTTP 101 Switching Protocols status to confirm the upgrade. Immediately after the connection is accepted and STATE_SYNC is received, the Coordinator MUST send an AUTH message. The relay hashes the incoming token and compares it to the stored hash. If successful, the relay promotes the session to role: `admin` and broadcasts a `ROLE_UPDATE`.
+
+Once the Coordinator receives the HTTP 200 response, they establish a WebSocket connection presenting `Sec-WebSocket-Protocol: signingroom-v2, pass.<BlindPass>`. The relay MUST return an HTTP 101 Switching Protocols status (with `Sec-WebSocket-Protocol: signingroom-v2`) to confirm the upgrade. Immediately after the connection is accepted and `SESSION_CONNECTED` and `STATE_SYNC` are received, the Coordinator MUST send an `AUTH` message. The relay hashes the incoming token and compares it to the stored hash. If successful, the relay promotes the session to `role: "admin"` and broadcasts a `ROLE_UPDATE`.
 
 #### WebSocket Status Codes
+
 To ensure cross-client compatibility, compliant relays MUST utilize the following WebSocket status codes when terminating a connection. Codes in the 4xxx range are utilized for protocol-specific errors. Relays SHOULD attempt to send a JSON error message before closing the socket to provide more context to the client UI.
 
 | Code | Label | Reason | Client Action |
-| :--- | :--- | :--- | :--- |
-| **1000** | Normal Closure or Locked | The room was closed or locked by the Coordinator or has naturally expired. | Stop. Notify user. |
-| **4001** | Room Full | The session has reached the maximum allowed concurrent connections (Default: 40). | Wait and retry. |
-| **4003** | IP Banned | The client's IP address has been temporarily banned due to repeated authentication failures (Brute Force Protection). | Stop. Wait for cooldown. |
-| **4004** | Room Not Found | The roomId provided does not exist in the relay's volatile memory. | Stop. Verify URI. |
+| --- | --- | --- | --- |
+| **1000** | Normal Closure or Locked | The room was closed by the Coordinator, naturally expired, or is locked against new unverified entrants. | Stop. Notify user. |
+| **4001** | Room Full | The session has reached the maximum allowed concurrent connections (Default: 40) for net-new entrants. | Wait and retry. |
+| **4003** | IP Banned | The client's IP address (or session) has been temporarily locked out due to repeated authentication failures (Brute Force Protection). | Stop. Wait for cooldown. |
+| **4004** | Room Not Found | The `roomId` provided does not exist in the relay's active memory. | Stop. Verify URI. |
 | **4026** | Protocol Mismatch | The client's Major version is incompatible with the relay or the room's protocol version. | Stop. Update client app. |
 
 ### Guest Flow
