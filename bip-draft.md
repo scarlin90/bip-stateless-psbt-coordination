@@ -336,52 +336,71 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 
 #### Relay-to-Client Messages
 
-**SESSION_CONNECTED**: Sent by the relay immediately after the WebSocket handshake is accepted to provide the client with a temporary, room-specific identifier.
+**SESSION_CONNECTED**: Sent privately by the relay to the connecting socket immediately after the WebSocket handshake is accepted. Provides the client with a temporary, room-specific 4-character `sessionId` and a 256-bit (64-hex-character) `resumeToken` secret required to reclaim that session upon reconnection. The relay MUST store only `SHA-256(resumeToken)` internally and MUST NEVER broadcast the token or its hash to other participants.
 ```json
 { 
   "type": "SESSION_CONNECTED", 
-  "sessionId": "4_char_alphanumeric_string" 
+  "sessionId": "4_char_alphanumeric_string",
+  "resumeToken": "64_char_hex_secret"
 }
+
 ```
 
+**CONSTRAINT_UPDATE**: Transmitted by the relay to a client immediately following a successful `AUTH_ROLE` challenge. The client decrypts the payload to enforce local UI constraints.
 
-**CONSTRAINT_UPDATE**: Transmitted by the relay to a client immediately following a successful AUTH_ROLE challenge. The client decrypts the payload to enforce local UI constraints.
 ```json
 {
   "type": "CONSTRAINT_UPDATE",
   "policyBlob": "base64_encrypted_policy_blob"
 }
+
 ```
 
-**STATE_SYNC**: The initial payload sent to every connecting client. **MUST NOT** include the `adminToken`. All metadata is strictly encrypted.
+**STATE_SYNC**: The initial payload sent to every connecting client. **MUST NOT** include `adminToken`, `roleTokens`, `nonceOwners`, `signatureOwners`, `logCounts`, or any participant's `resumeTokenHash`. All sensitive metadata is strictly encrypted.
+
 ```json
 { 
-    "type": "STATE_SYNC", 
-    "roomId": "uuid_string", 
-    "network": "bitcoin|testnet|signet", 
-    "roomName": "base64_encrypted_room_name", 
-    "encryptedPsbt": "base64_encrypted_psbt", 
-    "signatures": ["base64_encrypted_psbt"], 
-    "isLocked": "boolean", 
-    "auditLog": ["base64_encrypted_log_json"], 
-    "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
-    "addressLabels": {"blinded_hex_address": "base64_encrypted_label"},
-    "whitelist": "base64_encrypted_array",
-    "participants": {
-      "session_id": {
-        "id": "session_id",
-        "role": "admin|guest",
-        "encryptedDisplayName": "base64_blob"
-      }
-    },
-    "encryptedFinalTxHex": "base64_encrypted_hex",
-    "encryptedFinalTxId": "base64_encrypted_txid",
-    "connectedCount": "number", 
-    "protocolVersion": "semver_string" 
+  "type": "STATE_SYNC", 
+  "roomId": "uuid_string", 
+  "protocol": "standard|musig2",
+  "network": "bitcoin|testnet|signet", 
+  "roomName": "base64_encrypted_room_name", 
+  "encryptedPsbt": "base64_encrypted_psbt_or_null", 
+  "transientPsbt": "base64_encrypted_setup_psbt_or_null",
+  "nonces": ["base64_encrypted_nonce_psbt"],
+  "signatures": ["base64_encrypted_psbt"], 
+  "isLocked": "boolean", 
+  "auditLog": [
+    {
+      "seq": 0,
+      "serverTimestamp": 1710000000500,
+      "sessionId": "ABCD",
+      "role": "guest",
+      "blob": "base64_encrypted_log_json",
+      "chainHash": "sha256_hex_digest"
+    }
+  ], 
+  "auditChainHead": "sha256_hex_digest",
+  "signerLabels": {"blinded_hex_fingerprint": "base64_encrypted_label"}, 
+  "addressLabels": {"blinded_hex_address": "base64_encrypted_label"},
+  "whitelist": "base64_encrypted_array",
+  "participants": {
+    "session_id": {
+      "id": "session_id",
+      "role": "admin|guest",
+      "encryptedDisplayName": "base64_blob"
+    }
+  },
+  "encryptedFinalTxHex": "base64_encrypted_hex",
+  "encryptedFinalTxId": "base64_encrypted_txid",
+  "connectedCount": "number", 
+  "protocolVersion": "semver_string" 
 }
+
 ```
 
-**PARTICIPANTS_UPDATE**: Broadcast to keep clients in sync with the historical and active roster of participants, ensuring comprehensive audit logs even if users disconnect.
+**PARTICIPANTS_UPDATE**: Broadcast to keep clients in sync with the historical and active roster of participants (with `resumeTokenHash` stripped), ensuring comprehensive audit logs even if users disconnect.
+
 ```json
 {
   "type": "PARTICIPANTS_UPDATE",
@@ -389,14 +408,18 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
     "A1B2": { "id": "A1B2", "role": "admin", "encryptedDisplayName": "base64_blob" }
   }
 }
+
 ```
 
 **ROLE_UPDATE**: Confirms a successful `AUTH` challenge.
+
 ```json
 { "type": "ROLE_UPDATE", "role": "admin" }
+
 ```
 
 **CONNECTIONS_UPDATE**: Broadcast whenever a participant joins, leaves, or updates their display name.
+
 ```json
 { 
   "type": "CONNECTIONS_UPDATE", 
@@ -405,63 +428,126 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
     { "id": "A1B2", "role": "admin", "encryptedDisplayName": "base64_blob" }
   ]
 }
+
+```
+
+**NEW_NONCE_DATA** (MuSig2 Round 1): Broadcast to all participants when a BIP 373 public nonce is contributed.
+
+```json
+{ "type": "NEW_NONCE_DATA", "data": { "encryptedData": "base64_blob" }, "fingerprint": "hex_string", "sessionId": "4_char_alphanumeric_string" }
+
+```
+
+**AGGREGATE_PSBT_PUBLISHED** (MuSig2 Round 2 Transition): Broadcast to all participants when the Coordinator publishes the aggregated nonce PSBT to begin Round 2 signing.
+
+```json
+{ "type": "AGGREGATE_PSBT_PUBLISHED", "encryptedPsbt": "base64_encrypted_aggregate_psbt" }
+
 ```
 
 **NEW_PARTIAL_DATA**: Broadcast to all participants when a signature is contributed.
+
 ```json
 { "type": "NEW_PARTIAL_DATA", "data": { "encryptedData": "base64_blob" }, "fingerprint": "hex_string", "sessionId": "4_char_alphanumeric_string" }
+
 ```
 
 **ROOM_RENAMED**: Broadcast when the Coordinator updates the session title.
+
 ```json
 { "type": "ROOM_RENAMED", "encryptedName": "base64_encrypted_room_name" }
+
 ```
 
 **LABELS_UPDATED**: Broadcast when signer aliases are added or modified.
+
 ```json
 { "type": "LABELS_UPDATED", "signerLabels": { "fingerprint": "base64_encrypted_label" } }
+
 ```
 
-**ADDRESS_LABELS_UPDATED**: Broadcast when signer aliases are added or modified.
+**ADDRESS_LABELS_UPDATED**: Broadcast when UTXO address aliases are added or modified.
+
 ```json
 { "type": "ADDRESS_LABELS_UPDATED", "addressLabels": { "blinded_hex_address": "base64_encrypted_label" } }
+
 ```
 
-**WHITELIST_UPDATED**: Broadcast when UTXO address aliases are added or modified.
+**WHITELIST_UPDATED**: Broadcast when the verified UTXO address whitelist is updated.
+
 ```json
 { "type": "WHITELIST_UPDATED", "encryptedWhitelist": "base64_encrypted_array" }
+
 ```
 
-**LOG_UPDATE**: Broadcast to keep participants' audit logs in sync. The payload is an array of opaque strings.
+**LOG_UPDATE**: Incremental broadcast sent whenever a new audit event is recorded, avoiding full-array re-broadcasts. Each envelope is chained via SHA-256 over the previous envelope's hash (`chainHash = SHA-256(prevChainHash + "|" + seq + "|" + serverTimestamp + "|" + sessionId + "|" + role + "|" + blob)`, with genesis `prevChainHash = "0".repeat(64)`) so clients can cryptographically detect relay-side truncation or reordering.
+
 ```json
-{ "type": "LOG_UPDATE", "auditLog": ["base64_encrypted_log_json", "base64_encrypted_log_json"] }
+{
+  "type": "LOG_UPDATE",
+  "entry": {
+    "seq": 1,
+    "serverTimestamp": 1710000000500,
+    "sessionId": "A1B2",
+    "role": "guest",
+    "blob": "base64_encrypted_log_json",
+    "chainHash": "sha256_hex_digest"
+  },
+  "chainHead": "sha256_hex_digest"
+}
+
 ```
 
-**LOCK_UPDATED**: Broadcast to notify guests of room entry restrictions.
+**LOCK_UPDATED**: Broadcast to notify participants of room entry restrictions.
+
 ```json
 { "type": "LOCK_UPDATED", "isLocked": true }
+
 ```
 
 **TX_FINALIZED_BROADCAST**: Broadcast to all participants when the transaction is ready for network submission.
+
 ```json
 { 
   "type": "TX_FINALIZED_BROADCAST", 
   "encryptedFinalTxHex": "base64_encrypted_hex",
   "encryptedFinalTxId": "base64_encrypted_txid"
 }
+
 ```
 
-**ERROR_VERSION_MISMATCH**: Sent before closing the socket if the Major version is incompatible.
+**ROOM_CLOSED**: Broadcast to all connected participants immediately before the relay wipes state and closes all sockets upon receiving `CLOSE_ROOM`.
+
+```json
+{ "type": "ROOM_CLOSED" }
+
+```
+
+**ERROR_POLICY_VIOLATION**: Sent to a client when an action violates its role capability constraints (`canUpload: false`), exceeds its per-session audit log quota, or attempts to overwrite a signer fingerprint slot already claimed by another session.
+
+```json
+{
+  "type": "ERROR_POLICY_VIOLATION",
+  "message": "Signer slot already claimed by another participant session."
+}
+
+```
+
+**ERROR_VERSION_MISMATCH**: Sent before closing the socket (`4026`) if the Major version is incompatible.
+
 ```json
 { "type": "ERROR_VERSION_MISMATCH", "roomVersion": "semver_string" }
+
 ```
 
-**ERROR / ERROR_LOCKED / ERROR_NOT_FOUND**: Relays MUST use standardized error handling to disconnect unauthorized clients.
+**ERROR / ERROR_LOCKED / ERROR_NOT_FOUND**: Relays MUST use standardized error handling to notify or disconnect unauthorized clients (and surface storage or room byte-budget failures via `code: "ROOM_STATE_BUDGET_EXCEEDED"` or `"STORAGE_WRITE_FAILED"`).
+
 ```json
 { 
-    "type": "ERROR", 
-    "message": "Payload too large (Max 2MB)" 
+  "type": "ERROR", 
+  "message": "Payload too large (Max 2MB)" 
 }
+
 ```
 
 ### Coordinator Flow
