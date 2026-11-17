@@ -9,37 +9,37 @@ BIP: ?
   Created: 2026-03-20
   License: CC0-1.0
   License-Code: BSD-3-Clause
-  Requires: 174
+  Requires: 174, 327, 373
   ```
 
 ## Abstract
 
-This document proposes a standard for the trustless coordination of multi-signature Partially Signed Bitcoin Transactions (PSBTs) utilizing an ephemeral, stateless End-to-End Encrypted (E2EE) WebSocket relay. 
+This document proposes a standard for the trustless coordination of multi-signature Partially Signed Bitcoin Transactions (PSBTs), including standard BIP 174 workflows and two-round BIP 327 / BIP 373 MuSig2 ceremonies utilizing an ephemeral, End-to-End Encrypted (E2EE), operator-blind WebSocket relay.
 
-Currently, coordinating N-of-M Bitcoin transactions suffers from a Coordination Vulnerability. Users must either pass PSBTs manually out-of-band or rely on stateful, centralized servers that inherently leak metadata, signer identities, and quorum relationships. 
+Currently, coordinating N-of-M Bitcoin transactions suffers from a Coordination Vulnerability. Users must either pass PSBTs manually out-of-band or rely on stateful, centralized servers that inherently leak metadata, signer identities, and quorum relationships.
 
-To resolve this, this standard introduces a Blind Relay architecture. By utilizing AES-GCM-256 encryption with decryption keys stored exclusively in client-side URL fragments or passed out of band, the protocol ensures that sensitive transaction data is never exposed to the server. The relay facilitates real-time, synchronous updates via WebSockets but maintains a strict zero-disk-state and zero-knowledge stance. It routes encrypted payloads strictly in RAM for a max 24 hours or until the signing event has completed. Upon destruction, it retains no transaction content or persistent metadata. This provides the real-time user experience of a centralized coordinator while preserving the security and privacy guarantees of an air-gapped workflow.
+To resolve this, this standard introduces a Blind Relay architecture. By utilizing AES-GCM-256 encryption with context-bound Additional Authenticated Data (AAD) and decryption keys stored exclusively in client-side URL fragments or passed out of band, the protocol ensures that sensitive transaction data is never exposed to the server. The relay facilitates real-time, synchronous updates via WebSockets while maintaining a strict operator-blind stance. It routes encrypted payloads in isolated ephemeral state for a maximum of 24 hours or until the signing event has completed. Upon destruction, all encrypted session state is permanently purged (retaining only a 28-byte timestamp tombstone for 1 hour to prevent room ID reuse), leaving no transaction content or persistent metadata. This provides the real-time user experience of a centralized coordinator while preserving the security and privacy guarantees of an air-gapped workflow.
 
 ## Motivation
 
-Bitcoin multi-signature (N-of-M) coordination currently suffers from a Coordination Gap. While the security of signing devices has evolved rapidly, the process of passing Partially Signed Bitcoin Transactions (PSBTs) between signers remains a critical friction point for all users.
+Bitcoin multi-signature (N-of-M) and Taproot MuSig2 coordination currently suffer from a Coordination Gap. While the security of signing devices has evolved rapidly, the process of passing Partially Signed Bitcoin Transactions (PSBTs) and round-trip public nonces between signers remains a critical friction point for all users.
 
 Existing solutions force users into a binary choice, both of which are inadequate:
-* Manual, Out-of-Band Transfers (USB drives, emails, secure messaging): Preserves privacy but introduces heavy operational friction, latency, and human error, making cross-device participation difficult.
-* Stateful Coordination Servers: Centralized databases provide a seamless User Experience (UX) but act as privacy honeypots. They log sensitive metadata, IP addresses, quorum relationships, and often store PSBTs on disk. Furthermore, some platforms hold extended public keys (xpubs) to enforce vendor lock-in, or drift toward quasi-custodial models that inherently compromise the trustless security guarantees of the network.
+* Manual, Out-of-Band Transfers (USB drives, emails, secure messaging): Preserves privacy but introduces heavy operational friction, latency, and human error, making cross-device participation and multi-round MuSig2 nonce aggregation difficult.
+* Stateful Coordination Servers: Centralized databases provide a seamless User Experience (UX) but act as privacy honeypots. They log sensitive metadata, IP addresses, quorum relationships, and often store PSBTs in long-lived databases. Furthermore, some platforms hold extended public keys (xpubs) to enforce vendor lock-in, or drift toward quasi-custodial models that inherently compromise the trustless security guarantees of the network.
 
-The Bitcoin community has previously recognized the need for standardized, encrypted coordination. In 2023, BIP 77 (Async Payjoin) successfully introduced a directory-based standard for 2-party transactions, utilizing out-of-band URI sharing to establish encrypted routing. However, BIP 77 relies on an asynchronous store and forward architecture. The directory server must write encrypted payloads to disk until the receiver comes online. While sufficient for 1-to-1 Payjoin, storing multi-party payloads on disk introduces Directory Denial of Service (DoS) vectors and latency for iterative, real-time N-of-M signing rounds.
+The Bitcoin community has previously recognized the need for standardized, encrypted coordination. In 2023, BIP 77 (Async Payjoin) successfully introduced a directory-based standard for 2-party transactions, utilizing out-of-band URI sharing to establish encrypted routing. However, BIP 77 relies on an asynchronous store and forward architecture. The directory server must write encrypted payloads to disk until the receiver comes online. While sufficient for 1-to-1 Payjoin, storing multi-party payloads in persistent databases introduces Directory Denial of Service (DoS) vectors and latency for iterative, real-time N-of-M and two-round MuSig2 signing rounds.
 
-To bridge this gap, this protocol provides a Digital Airgap. By utilizing full-duplex WebSockets to stream PSBTs instantly between peers, it provides the real-time convenience of a centralized server without many of the associated privacy leaks.
+To bridge this gap, this protocol provides a Digital Airgap. By utilizing full-duplex WebSockets to stream PSBTs and public nonces instantly between peers, it provides the real-time convenience of a centralized server without many of the associated privacy leaks.
 
 The motivation for this protocol is to establish a standard that:
-* Eliminates Metadata Persistence: Utilizing stateless workers ensures no transaction data or quorum associations are ever written to disk.
-* Enforces Zero-Knowledge: The server cannot decrypt the data it relays. Decryption keys are shared strictly out-of-band or via URL fragments
-* Streamlines UX: Provides a web-standard URI for instant, cross-device participation, allowing hardware wallets and software clients to coordinate seamlessly.
+* Eliminates Long-Term Metadata Persistence: Utilizing ephemeral session workers with automatic self-destruction ensures no transaction data or quorum associations are retained after a ceremony concludes.
+* Enforces Operator-Blind E2EE: The server cannot decrypt the data it relays or substitute ciphertexts across fields. Decryption keys are shared strictly out-of-band or via URL fragments.
+* Streamlines UX: Provides a web-standard URI for instant, cross-device participation, allowing hardware wallets and software clients to coordinate seamlessly across both standard multisig and MuSig2 ceremonies.
 
 ## Relation to Other BIPs
 
-This proposal builds directly on [BIP 174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki) (Partially Signed Bitcoin Transactions). It serves as a real-time, multi-party complement to [BIP 77](https://github.com/bitcoin/bips/blob/master/bip-0077.md) (Async Payjoin). While BIP 77 provides an asynchronous store-and-forward directory suitable for 2-party coordination, this BIP targets interactive N-of-M multisig ceremonies with strict ephemerality, zero persistent storage on the relay, and blinded zero-knowledge routing.
+This proposal builds directly on [BIP 174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki) (Partially Signed Bitcoin Transactions), [BIP 327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki) (MuSig2 for BIP340-compatible Multi-Signatures), and [BIP 373](https://github.com/bitcoin/bips/blob/master/bip-0373.mediawiki) (MuSig2 PSBT Fields). It serves as a real-time, multi-party complement to [BIP 77](https://github.com/bitcoin/bips/blob/master/bip-0077.md) (Async Payjoin). While BIP 77 provides an asynchronous store-and-forward directory suitable for 2-party coordination, this BIP targets interactive N-of-M multisig and MuSig2 ceremonies with strict ephemerality, automatic state purging on the relay, and blinded operator-blind routing.
 
 ## Rationale
 
