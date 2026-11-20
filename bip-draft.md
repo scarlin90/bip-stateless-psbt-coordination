@@ -164,11 +164,6 @@ All communication over the WebSocket MUST use a JSON-based message format. Every
 
 #### Client-to-Relay Messages
 
-### Message Schema
-All communication over the WebSocket MUST use a JSON-based message format. Every message MUST contain a `type` field. All sensitive payload data, including logs, labels, and room names, MUST be transmitted as opaque Base64-encoded strings encrypted via AES-GCM-256 with their corresponding field AAD.
-
-#### Client-to-Relay Messages
-
 **AUTH**: Sent by the Coordinator to claim administrative privileges. The token is the Base64-encoded encrypted admin UUID (`encryptedAdminToken`), which the relay hashes with SHA-256 and compares against the stored hash.
 ```json
 { 
@@ -564,7 +559,7 @@ sequenceDiagram
     Note over S: Operator-blind ephemeral state<br/>All payloads relayed encrypted (24h TTL max)
 
     A->>A: Generate 256-bit FBEK (locally)
-    A->>A: Derive Blind Pass = SHA-256(roomId + FBEK)
+    A->>A: Derive Blind Pass = SHA-256(roomId + FBEK)[0:16]
     A->>A: Encrypt base PSBT (with AAD) + adminToken (AES-GCM)
     A->>S: HTTP POST /api/room<br/>(roomId, encryptedPsbt, adminToken, expectedPass=Blind Pass, protocol)
     S->>S: Validate bounds & hash adminToken (SHA-256)<br/>Allocate ephemeral room state (24h TTL max)
@@ -588,7 +583,7 @@ sequenceDiagram
     OOB->>C: Charlie receives same URI securely
 
     B->>B: Extract FBEK & Role Token from URI fragment
-    B->>B: Compute Blind Pass = SHA-256(roomId + FBEK)
+    B->>B: Compute Blind Pass = SHA-256(roomId + FBEK)[0:16]
     B->>S: WebSocket connect (?v=2.0.0 | Sec-WebSocket-Protocol: signingroom-v2, pass.<BlindPass>)
     S->>B: WebSocket: SESSION_CONNECTED (sessionId, resumeToken)
     S-->>A: Broadcast: PARTICIPANTS_UPDATE & CONNECTIONS_UPDATE
@@ -715,7 +710,6 @@ To ensure cross-client compatibility, compliant relays MUST utilize the followin
 | --- | --- | --- | --- |
 | **1000** | Normal Closure or Locked | The room was closed by the Coordinator, naturally expired, or is locked against new unverified entrants. | Stop. Notify user. |
 | **4001** | Room Full | The session has reached the maximum allowed concurrent connections (Default: 40) for net-new entrants. | Wait and retry. |
-| **4003** | IP Banned | The client's IP address (or session) has been temporarily locked out due to repeated authentication failures (Brute Force Protection). | Stop. Wait for cooldown. |
 | **4004** | Room Not Found | The `roomId` provided does not exist in the relay's active memory. | Stop. Verify URI. |
 | **4026** | Protocol Mismatch | The client's Major version is incompatible with the relay or the room's protocol version. | Stop. Update client app. |
 
@@ -795,33 +789,42 @@ If a client detects it is connecting to an older relay version, it MUST disable 
 The following test vectors allow developers to verify their implementation of the AES-GCM-256 encryption, message enveloping, and cryptographic blinding layers.
 
 ### Cryptographic Primitives & Keys
-To ensure determinism across these test vectors, the Initialization Vectors (IVs) are forced to sequential values rather than utilizing a CSPRNG. The global key utilized for all vectors below is a 32-byte array filled with `0x01`.
-* **Raw Key (Hex)**: 0101010101010101010101010101010101010101010101010101010101010101
-* **Global FBEK (Base64)**: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
+To ensure determinism across these test vectors, the Initialization Vectors (IVs) are forced to sequential values rather than utilizing a CSPRNG. The global key utilized for all vectors below is a 32-byte array filled with `0x01`, bound to the canonical Room ID below.
+* **Canonical Room ID**: `123e4567-e89b-12d3-a456-426614174000`
+* **Raw Key (Hex)**: `0101010101010101010101010101010101010101010101010101010101010101`
+* **Global FBEK (Base64)**: `AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=`
+* **Blind Room Pass (`SHA-256(roomId + FBEK)[0:16]`)**: `f7d4f766ce529c98`
+* **WebSocket `Sec-WebSocket-Protocol` Header**: `signingroom-v2, pass.f7d4f766ce529c98`
 
-(Note: In a production environment, IVs and FBEKs MUST be generated using a CSPRNG).
+(Note: In a production environment, IVs, FBEKs, and resumption tokens MUST be generated using a CSPRNG).
 
-#### Message Payload Vectors
-All ciphertexts below are encoded in Base64 as the exact concatenation of IV + Ciphertext + AuthTag.
+#### Message Payload Vectors (Client-to-Relay)
+
+All ciphertexts below are encoded in Base64 as the exact concatenation of `IV (12 bytes) + Ciphertext + AuthTag (16 bytes)`.
 
 ##### AUTH
-* **adminSecret Plaintext (UUID)**: 4155db36-6997-4f67-8ccb-1d740c0f54b6
-* **encryptedAdminToken IV (Hex)**: c8c9cacbcccdcecfd0d1d2d3
-* **encryptedAdminToken Output (Base64)**: yMnKy8zNzs/Q0dLTvAb2ly5VhMUq82TLt9c3XgY+qehwI5XpC2XTbl5MTQWF9bWecZ5XUEkCH529CZN7aiVpBg==
-* **Final Transmitted Token (SHA-256 of Base64)**: 385964357f9cf10af95036aeb45285463d627b404602d7b7f2f2e9b88a4bec8d
+
+- **adminSecret Plaintext (UUID)**: `"4155db36-6997-4f67-8ccb-1d740c0f54b6"`
+- **encryptedAdminToken AAD**: _(none — local sessionStorage backup token)_
+- **encryptedAdminToken IV (Hex)**: `c8c9cacbcccdcecfd0d1d2d3`
+- **encryptedAdminToken Output (Base64)**: `yMnKy8zNzs/Q0dLTvAb2ly5VhMUq82TLt9c3XgY+qehwI5XpC2XTbl5MTQWF9bWecZ5XUEkCH529CZN7aiVpBg==`
+- **Stored Relay Hash (`SHA-256` of Base64 `encryptedAdminToken`)**: `385964357f9cf10af95036aeb45285463d627b404602d7b7f2f2e9b88a4bec8d`
+
 ```json
 {
   "type": "AUTH",
-  "token": "385964357f9cf10af95036aeb45285463d627b404602d7b7f2f2e9b88a4bec8d"
+  "token": "yMnKy8zNzs/Q0dLTvAb2ly5VhMUq82TLt9c3XgY+qehwI5XpC2XTbl5MTQWF9bWecZ5XUEkCH529CZN7aiVpBg=="
 }
 ```
 
 ##### REGISTER_ROLE
-* **roleToken Plaintext (Hex)**: "7483256acea64db3b3d0a38efd9104b5"
-* **tokenHash Output (SHA-256)**: 06b44d1facc4ea54da823bafc43f3358a6a52931238dde7c25c13d8e013db8d0
-* **policyBlob Plaintext JSON**: {"tokenId":"7483256a","canUploadSignature":true,"canExportPsbt":false,"canExportAudit":false,"canViewDetails":true,"canViewSigners":true,"canShareSession":false}
-* **policyBlob IV (Hex)**: f0f1f2f3f4f5f6f7f8f9fafb
-* **policyBlob Output (Base64)**: 8PHy8/T19vf4+fr7znmbfzpUQasQ5NUqAmiO894vWVxkdwcmw8Vy+wtXn+z66sVKrDu9ti2cYsW/tnT199TEGafAuMTyKb1CyP31/qBSfTrqG4hDo/d/1sRxlEJ4mrPvExafm7zfAdH/kgRwed7XCm/E3Q1DUYzgoiemj7FFyLXtLbHmm6KZgI4GALRib+F3WkpPazW3c9sXm6tsvOpPHZRKpk0ZEmfAzb24T31uA2IkRplixgemhBvI5+T4
+
+- **roleToken Plaintext (Hex)**: `"7483256acea64db3b3d0a38efd9104b5"`
+- **tokenHash Output (SHA-256)**: `06b44d1facc4ea54da823bafc43f3358a6a52931238dde7c25c13d8e013db8d0`
+- **policyBlob Plaintext JSON**: `{"tokenId":"7483256a","canUploadSignature":true,"canExportPsbt":false,"canExportAudit":false,"canViewDetails":true,"canViewSigners":true,"canShareSession":false}`
+- **policyBlob IV (Hex)**: `f0f1f2f3f4f5f6f7f8f9fafb`
+- **policyBlob Output (Base64)**: `8PHy8/T19vf4+fr7znmbfzpUQasQ5NUqAmiO894vWVxkdwcmw8Vy+wtXn+z66sVKrDu9ti2cYsW/tnT199TEGafAuMTyKb1CyP31/qBSfTrqG4hDo/d/1sRxlEJ4mrPvExafm7zfAdH/kgRwed7XCm/E3Q1DUYzgoiemj7FFyLXtLbHmm6KZgI4GALRib+F3WkpPazW3c9sXm6tsvOpPHZRKpk0ZEmfAzb24T31uA2IkRplixgemhBvI5+T4`
+
 ```json
 {
   "type": "REGISTER_ROLE",
@@ -831,9 +834,10 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
 }
 ```
 
-
 ##### AUTH_ROLE
-* **token (Role Fragment)**: "7483256acea64db3b3d0a38efd9104b5"
+
+- **token (Role Fragment)**: `"7483256acea64db3b3d0a38efd9104b5"`
+
 ```json
 {
   "type": "AUTH_ROLE",
@@ -841,131 +845,206 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
 }
 ```
 
+##### UPLOAD_NONCE (MuSig2 Round 1)
+
+- **Fingerprint Plaintext**: `"af4b013d"`
+- **Fingerprint Output (Blinded)**: `07877d968ee881d3`
+- **encryptedData Plaintext**: `"cHNidP8BAFICAAAA...0x1b_musig2_pubnonce..."`
+- **encryptedData AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:nonce"`
+- **encryptedData IV (Hex)**: `b4b5b6b7b8b9babbbcbdbebf`
+- **encryptedData Output (Base64)**: `tLW2t7i5uru8vb6/k7jKx/dH4NsTQ0SPlCijSx/Gupq8oIeIla0shat8MldjcyG5homEk6Ww8erPKz5b/xvRpuuXb7VFhw==`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":1,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Public Nonce Uploaded","detail":"Signer: af4b013d","user":"Guest (ABCD)"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `c0c1c2c3c4c5c6c7c8c9cacb`
+- **encryptedLogBlob Output (Base64)**: `wMHCw8TFxsfIycrLRUsCwkpyJXs2A0sqsrc4KTRcbcw9eS7lNdagc2g1UvT0vSP7uukbM2h3q1XBfdojWssK5lR1HIxnHL36Zb281xvu2QdUdQikE3VBrR3wc29OnGuWLHmSqW1CM3AQMOr0Y0Lw8BJVpKRPaq4fbMKYXcKPta3oNGTrhQVyGLSyljpM+II2rtWOF/dhXTud3CszIk6o+juUYo3RXmY9rXb8fvmT2CjAgzhdVeJOQ0Bajpw03yhg6Q==`
+
+```json
+{
+  "type": "UPLOAD_NONCE",
+  "fingerprint": "07877d968ee881d3",
+  "data": {
+    "encryptedData": "tLW2t7i5uru8vb6/k7jKx/dH4NsTQ0SPlCijSx/Gupq8oIeIla0shat8MldjcyG5homEk6Ww8erPKz5b/xvRpuuXb7VFhw=="
+  },
+  "encryptedLogBlob": "wMHCw8TFxsfIycrLRUsCwkpyJXs2A0sqsrc4KTRcbcw9eS7lNdagc2g1UvT0vSP7uukbM2h3q1XBfdojWssK5lR1HIxnHL36Zb281xvu2QdUdQikE3VBrR3wc29OnGuWLHmSqW1CM3AQMOr0Y0Lw8BJVpKRPaq4fbMKYXcKPta3oNGTrhQVyGLSyljpM+II2rtWOF/dhXTud3CszIk6o+juUYo3RXmY9rXb8fvmT2CjAgzhdVeJOQ0Bajpw03yhg6Q=="
+}
+```
+
+##### PUBLISH_AGGREGATE_PSBT (MuSig2 Round 2 Transition)
+
+- **encryptedPsbt Plaintext**: `"cHNidP8BAFICAAAA...aggregated_0x1b_nonces..."`
+- **encryptedPsbt AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:psbt"`
+- **encryptedPsbt IV (Hex)**: `363738393a3b3c3d3e3f4041`
+- **encryptedPsbt Output (Base64)**: `Njc4OTo7PD0+P0BBO7A+q/MaTQ48R5+8r5I6AYnRbJT3ns+ftJGh8BLYRv1Qxcw0c4jXcAZlrLyop1aIs9X3JtoMyrInVhuZ`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":8,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Aggregate Nonce Broadcasted","detail":"Coordinator transitioning room to signing phase","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `42434445464748494a4b4c4d`
+- **encryptedLogBlob Output (Base64)**: `QkNERUZHSElKS0xNGInlgHFVqO/hB2y+UNxLgl+aJEWkA5zS5PKS/6ZVGO7qYOz4aXpgU0jCA9jZ0zJfyvq8lUOj70bSVFvSipcIbZ+0PQ5DeUVxPmc6SzM6+uuCiSsIvcHVnroIQ7Kyfvr58A1/2lrBRFxS614HD0AqxCM6Tna6wGKG6iyr+dFAIogfSivCIoqFchhFLZ3DQch367Sgi9p8G8B7CErvu+krX7018CrRbxwT4TxFV79KJ2S+5ARjGigltIbUGCVMO7IfT+ewZpxCYFN3ZSNHQgS8koyVgi28PRhnfQ==`
+
+```json
+{
+  "type": "PUBLISH_AGGREGATE_PSBT",
+  "encryptedPsbt": "Njc4OTo7PD0+P0BBO7A+q/MaTQ48R5+8r5I6AYnRbJT3ns+ftJGh8BLYRv1Qxcw0c4jXcAZlrLyop1aIs9X3JtoMyrInVhuZ",
+  "encryptedLogBlob": "QkNERUZHSElKS0xNGInlgHFVqO/hB2y+UNxLgl+aJEWkA5zS5PKS/6ZVGO7qYOz4aXpgU0jCA9jZ0zJfyvq8lUOj70bSVFvSipcIbZ+0PQ5DeUVxPmc6SzM6+uuCiSsIvcHVnroIQ7Kyfvr58A1/2lrBRFxS614HD0AqxCM6Tna6wGKG6iyr+dFAIogfSivCIoqFchhFLZ3DQch367Sgi9p8G8B7CErvu+krX7018CrRbxwT4TxFV79KJ2S+5ARjGigltIbUGCVMO7IfT+ewZpxCYFN3ZSNHQgS8koyVgi28PRhnfQ=="
+}
+```
+
 ##### UPLOAD_PARTIAL
-* **Fingerprint Plaintext**: af4b013d
-* **Fingerprint Output (Blinded)**: 07877d968ee881d3
-* **encryptedData Plaintext**: "cHNidP8BAFICAAAA..."
-* **encryptedData IV (Hex)**: 000102030405060708090a0b
-* **encryptedData Output (Base64)**: AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRXCFKWQvVzkwe4ujHioDt10=
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Signature Uploaded","detail":"Signer: af4b013d","user":"Guest (ABCD)"}
-* **encryptedLogBlob IV (Hex)**: 0c0d0e0f1011121314151617
-* **encryptedData IV (Hex)**: 000102030405060708090a0b
-* **encryptedLogBlob Output (Base64)**: DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl6Vi5xwkAwgGrmxSEP9xiInxX4iPjMyQTzxiqWtGBXWw6NJ92u+Z4hVwHA/NXBmh13yXAraMzqeMGb9pNNCpTwkhKbZl2RAq3Rbh7V4M6QRwfL4cQdO53zYKrPPZYEI=
+
+- **Fingerprint Plaintext**: `"af4b013d"`
+- **Fingerprint Output (Blinded)**: `07877d968ee881d3`
+- **encryptedData Plaintext**: `"cHNidP8BAFICAAAA..."`
+- **encryptedData AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:partial"`
+- **encryptedData IV (Hex)**: `000102030405060708090a0b`
+- **encryptedData Output (Base64)**: `AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRT8zCWAGBYYYFGtVnQlXo1I=`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":1,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Signature Uploaded","detail":"Signer: af4b013d","user":"Guest (ABCD)"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `0c0d0e0f1011121314151617`
+- **encryptedLogBlob Output (Base64)**: `DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl7Nx81BqEB4Gj2paE9dh38G2Tu/MhZfEHW4r7n9dAz31u98i1bSPhEo6RliJUAj0gH/BArePiKmCXrx/P9apTwk1NbR4zER37jGC/AdC+9HyK6XZ2quPwt8+acDREeTOASwonZMcZ+zVweS8CnhFIjWIn+yX7ZurAUF/OMp7FKhbzLHoe+uUkMMNkfffGnGPPUznqbntGQ==`
+
 ```json
 {
   "type": "UPLOAD_PARTIAL",
   "fingerprint": "07877d968ee881d3",
   "data": {
-    "encryptedData": "AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRXCFKWQvVzkwe4ujHioDt10="
+    "encryptedData": "AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRT8zCWAGBYYYFGtVnQlXo1I="
   },
-  "encryptedLogBlob": "DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl6Vi5xwkAwgGrmxSEP9xiInxX4iPjMyQTzxiqWtGBXWw6NJ92u+Z4hVwHA/NXBmh13yXAraMzqeMGb9pNNCpTwkhKbZl2RAq3Rbh7V4M6QRwfL4cQdO53zYKrPPZYEI="
+  "encryptedLogBlob": "DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl7Nx81BqEB4Gj2paE9dh38G2Tu/MhZfEHW4r7n9dAz31u98i1bSPhEo6RliJUAj0gH/BArePiKmCXrx/P9apTwk1NbR4zER37jGC/AdC+9HyK6XZ2quPwt8+acDREeTOASwonZMcZ+zVweS8CnhFIjWIn+yX7ZurAUF/OMp7FKhbzLHoe+uUkMMNkfffGnGPPUznqbntGQ=="
 }
 ```
 
 ##### UPDATE_LABEL
-* **label Plaintext**: "Bob - CFO"
-* **label IV (Hex)**: 18191a1b1c1d1e1f20212223
-* **label Output (Base64)**: GBkaGxwdHh8gISIjkojJaZC67eSRQZkvuALVzm565NRSdgpjQQ==
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Label Updated","detail":"Bob - CFO (af4b013d)","user":"Coordinator"}
-* **encryptedLogBlob IV (Hex)**: 2425262728292a2b2c2d2e2f
-* **encryptedLogBlob Output (Base64)**: JCUmJygpKissLS4v7XUur/MwOGniBCmKR6rWBeQr5208tNG/K07PN+h3yxZ9SJSgX+3HU3ps3D5Hno7A2kY6Qvt0FILOhmI2z3A7KldMjNM/hjBqUH+LqfLg6FQW6oc03H4NRd37UEpiYgfOiv9mbI0C4UpwZBpdopLHCPoe9RO4gAEY
+
+- **label Plaintext**: `"Bob - CFO"`
+- **label AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:signer_label:07877d968ee881d3"`
+- **label IV (Hex)**: `18191a1b1c1d1e1f20212223`
+- **label Output (Base64)**: `GBkaGxwdHh8gISIjkojJaZC67eSR8VG+BGTGBLeYMoBYi4giDA==`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":2,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Label Updated","detail":"Bob - CFO (af4b013d)","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `2425262728292a2b2c2d2e2f`
+- **encryptedLogBlob Output (Base64)**: `JCUmJygpKissLS4v7XUur/MwOGniBCmKR6rWBeQr5208tNG/K07PN/5k31ozWIKgYePKW18oq3QBzsiW21AjVqg8BdueiG0931ZnZRZVmaZU/SJ0ByiL+vXl6wAP6oc0zHsNWYvjSCtBbBfPj7FSaIYRt1JKhMgilRM0p8cF8F5rGaQ7rgm7/PjPpM3XNXYWZGcCR9LrsWvOhm1XvH8vCGAlaaI25PADkDlSn/k753QOuZ8GEO6QajRLGQM=`
+
 ```json
 {
   "type": "UPDATE_LABEL",
   "fingerprint": "07877d968ee881d3",
-  "label": "GBkaGxwdHh8gISIjkojJaZC67eSRQZkvuALVzm565NRSdgpjQQ==",
-  "encryptedLogBlob": "JCUmJygpKissLS4v7XUur/MwOGniBCmKR6rWBeQr5208tNG/K07PN+h3yxZ9SJSgX+3HU3ps3D5Hno7A2kY6Qvt0FILOhmI2z3A7KldMjNM/hjBqUH+LqfLg6FQW6oc03H4NRd37UEpiYgfOiv9mbI0C4UpwZBpdopLHCPoe9RO4gAEY"
+  "label": "GBkaGxwdHh8gISIjkojJaZC67eSR8VG+BGTGBLeYMoBYi4giDA==",
+  "encryptedLogBlob": "JCUmJygpKissLS4v7XUur/MwOGniBCmKR6rWBeQr5208tNG/K07PN/5k31ozWIKgYePKW18oq3QBzsiW21AjVqg8BdueiG0931ZnZRZVmaZU/SJ0ByiL+vXl6wAP6oc0zHsNWYvjSCtBbBfPj7FSaIYRt1JKhMgilRM0p8cF8F5rGaQ7rgm7/PjPpM3XNXYWZGcCR9LrsWvOhm1XvH8vCGAlaaI25PADkDlSn/k753QOuZ8GEO6QajRLGQM="
 }
 ```
 
 ##### SET_DISPLAY_NAME
-* **encryptedDisplayName Plaintext**: "Alice (Ledger)"
-* **encryptedDisplayName IV (Hex)**: 303132333435363738393a3b
-* **encryptedDisplayName Output (Base64)**: MDEyMzQ1Njc4OTo7WVOKPIr7HvDsNFdO0LXrLlLr32OLRZHne84CHoLv
+
+- **encryptedDisplayName Plaintext**: `"Alice (Ledger)"`
+- **encryptedDisplayName AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:display_name"`
+- **encryptedDisplayName IV (Hex)**: `303132333435363738393a3b`
+- **encryptedDisplayName Output (Base64)**: `MDEyMzQ1Njc4OTo7WVOKPIr7HvDsNFdO0LXNyShXDfxUZcq6S3uW7p6k`
+
 ```json
 {
   "type": "SET_DISPLAY_NAME",
-  "encryptedDisplayName": "MDEyMzQ1Njc4OTo7WVOKPIr7HvDsNFdO0LXrLlLr32OLRZHne84CHoLv"
+  "encryptedDisplayName": "MDEyMzQ1Njc4OTo7WVOKPIr7HvDsNFdO0LXNyShXDfxUZcq6S3uW7p6k"
 }
 ```
 
 ##### RENAME_ROOM
-* **encryptedName Plaintext**: "Q1 Treasury Board Vote"
-* **encryptedName IV (Hex)**: 3c3d3e3f4041424344454647
-* **encryptedName Output (Base64)**: PD0+P0BBQkNERUZHApT2Gnt86Im5Dp5eT8Hwclxpiwq4EpmB5Qq54wkY5ZNKYc3iej0=
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Room Renamed","detail":"Renamed: Q1 Treasury Board Vote","user":"Coordinator"}
-* **encryptedLogBlob IV (Hex)**: 48494a4b4c4d4e4f50515253
-* **encryptedLogBlob Output (Base64)**: SElKS0xNTk9QUVJTrSCuBxkVtcqHoR3s72m42zCPOAcS2pwIkZZyFgs20HlSrXRg+SHG/7DwMhh15Gsc1DhiolBt3NDqoyU+kRPb1aaaxcYjd1fWrr+l23on+1WIPoPvunDG9KHbMGAbb8o4pCMTIQtsG10UoItpvOyhuu3fnBAaJbsFDk5d+TGBb7Kouw==
+
+- **encryptedName Plaintext**: `"Q1 Treasury Board Vote"`
+- **encryptedName AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:room_name"`
+- **encryptedName IV (Hex)**: `3c3d3e3f4041424344454647`
+- **encryptedName Output (Base64)**: `PD0+P0BBQkNERUZHApT2Gnt86Im5Dp5eT8Hwclxpiwq4ErteZDvpDM4nnDUQa7LJxPI=`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":3,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Room Renamed","detail":"Renamed: Q1 Treasury Board Vote","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `48494a4b4c4d4e4f50515253`
+- **encryptedLogBlob Output (Base64)**: `SElKS0xNTk9QUVJTrSCuBxkVtcqHoR3s72m42zCPOAcS2pwIkZZyFh0lxDUcvGJg2SHG/9nGdUw2uDxLkyB18AI02IG/4zIt8RKGmarLlMouElTAzPz0iz5muRyYXsCsrWKDzLqNb2BlItAm4QNUdUhCEVZE6MBjuOyvoaOAv7uKJ/rYapq8Jm3/RH6AGaOeye9JgEM46yTgbmf6wkLlk/qThWpNT70yYUwi9p6+jR8Snj2ua8SBrc5HirFeVZtWBlD8Yd7q`
+
 ```json
 {
   "type": "RENAME_ROOM",
-  "encryptedName": "PD0+P0BBQkNERUZHApT2Gnt86Im5Dp5eT8Hwclxpiwq4EpmB5Qq54wkY5ZNKYc3iej0=",
-  "encryptedLogBlob": "SElKS0xNTk9QUVJTrSCuBxkVtcqHoR3s72m42zCPOAcS2pwIkZZyFgs20HlSrXRg+SHG/7DwMhh15Gsc1DhiolBt3NDqoyU+kRPb1aaaxcYjd1fWrr+l23on+1WIPoPvunDG9KHbMGAbb8o4pCMTIQtsG10UoItpvOyhuu3fnBAaJbsFDk5d+TGBb7Kouw=="
+  "encryptedName": "PD0+P0BBQkNERUZHApT2Gnt86Im5Dp5eT8Hwclxpiwq4ErteZDvpDM4nnDUQa7LJxPI=",
+  "encryptedLogBlob": "SElKS0xNTk9QUVJTrSCuBxkVtcqHoR3s72m42zCPOAcS2pwIkZZyFh0lxDUcvGJg2SHG/9nGdUw2uDxLkyB18AI02IG/4zIt8RKGmarLlMouElTAzPz0iz5muRyYXsCsrWKDzLqNb2BlItAm4QNUdUhCEVZE6MBjuOyvoaOAv7uKJ/rYapq8Jm3/RH6AGaOeye9JgEM46yTgbmf6wkLlk/qThWpNT70yYUwi9p6+jR8Snj2ua8SBrc5HirFeVZtWBlD8Yd7q"
 }
 ```
 
 ##### TOGGLE_LOCK
-* **isLocked Plaintext (Boolean)**: true
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Room Locked","detail":"Coordinator locked the room","user":"Coordinator"}
-* **encryptedLogBlob IV (Hex)**: 5455565758595a5b5c5d5e5f
-* **encryptedLogBlob Output (Base64)**: VFVWV1hZWltcXV5fqyBB6fx3SkS1KFn7KtW8IP6y1lecR7WvTJk9nk9D0HX8W2KBmH44OoQoM3DvBuqD1OputdXcwUqXyRuTMZnbBc79u33KUZCqb30q77xSicuET+SqIbScP4yjYx93etkt9KWiX/mqQA+8F0xxE/cyu316ILC90hokMi9hzPo=
+
+- **isLocked Plaintext (Boolean)**: `true`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":4,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Room Locked","detail":"Coordinator locked the room","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `5455565758595a5b5c5d5e5f`
+- **encryptedLogBlob Output (Base64)**: `VFVWV1hZWltcXV5fqyBB6fx3SkS1KFn7KtW8IP6y1lecR7WvTJk9nllQxDmyTXSBuH44Ou0AfimmUrySnfw/5paQzR6MkRThbJKaTMan7z+IF4LwNi91u+9GzZPRTbrnK6/bfdr0KlhXN4xil4aiTvamSkzkWlo2GveVa3HJ6gbF9vJtl9RlzXRXN1cIEmYAnhktwYOksZQ7EjKzQq2J/Q45ZLrklWAMqJ7WZ5Dl/LXr3O+FrSZbtXPC6+00knOocg==`
+
 ```json
 {
   "type": "TOGGLE_LOCK",
   "isLocked": true,
-  "encryptedLogBlob": "VFVWV1hZWltcXV5fqyBB6fx3SkS1KFn7KtW8IP6y1lecR7WvTJk9nk9D0HX8W2KBmH44OoQoM3DvBuqD1OputdXcwUqXyRuTMZnbBc79u33KUZCqb30q77xSicuET+SqIbScP4yjYx93etkt9KWiX/mqQA+8F0xxE/cyu316ILC90hokMi9hzPo="
+  "encryptedLogBlob": "VFVWV1hZWltcXV5fqyBB6fx3SkS1KFn7KtW8IP6y1lecR7WvTJk9nllQxDmyTXSBuH44Ou0AfimmUrySnfw/5paQzR6MkRThbJKaTMan7z+IF4LwNi91u+9GzZPRTbrnK6/bfdr0KlhXN4xil4aiTvamSkzkWlo2GveVa3HJ6gbF9vJtl9RlzXRXN1cIEmYAnhktwYOksZQ7EjKzQq2J/Q45ZLrklWAMqJ7WZ5Dl/LXr3O+FrSZbtXPC6+00knOocg=="
 }
 ```
 
 ##### UPDATE_WHITELIST
-* **encryptedWhitelist Plaintext**: ["bc1q04e2117f1b09f7c6a6ff92daecfb9a4de57bc4ca18e33933f28d1067d81b3196"]
-* **encryptedWhitelist IV (Hex)**: 606162636465666768696a6b
-* **encryptedWhitelist Output (Base64)**: YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUE2i0D49jRXFoceme9jEc5lg==
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Whitelist Updated","detail":"Added ...b3196 to whitelist","user":"Coordinator"}
-* **encryptedLogBlob IV (Hex)**: 6c6d6e6f7071727374757677
-* **encryptedLogBlob Output (Base64)**: bG1ub3BxcnN0dXZ3V4FtGiCXVi+oXG3ZU3D5qKDCHfMaxoLIgSuQeCXe/hSpqQEqLeySa8va2QgGF0FqY0mEwOO7DJYhXHEeciok0zUKPf3UbQ7xDttzB17ISbkSJ/Ym/rKKerLK3u9tHixKT3PMhA84IrJjgl/cVal/rrAR849AC1kNKfO2dBKKRUHD5KQ=
+
+- **encryptedWhitelist Plaintext**: `["bc1q04e2117f1b09f7c6a6ff92daecfb9a4de57bc4ca18e33933f28d1067d81b3196"]`
+- **encryptedWhitelist AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:whitelist"`
+- **encryptedWhitelist IV (Hex)**: `606162636465666768696a6b`
+- **encryptedWhitelist Output (Base64)**: `YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUEUtJjgxb9XKaJ6Lsp4f17Nw==`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":5,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Whitelist Updated","detail":"Added ...b3196 to whitelist","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `6c6d6e6f7071727374757677`
+- **encryptedLogBlob Output (Base64)**: `bG1ub3BxcnN0dXZ3V4FtGiCXVi+oXG3ZU3D5qKDCHfMaxoLIgSuQeDPN6ljnvhcqCOuUcufSkkFQBiYpYhzFk7C0RYx8WyhOKSI1xHZ/bK+cPRzpFsQlBVjFT6lWavpz862bcaqBl7kYWmdLWXrX1UE6NK1okU/QX+on46ZW+qRYAG/jOQCrpr0//hPQSVjPtDEBvgkFpXrCnfzpPJfQHfq6ftDdcnNchLTCnH6ldEM4jAnSaXdJxWeD+o80ebWC3T3HLxPlMA==`
+
 ```json
 {
   "type": "UPDATE_WHITELIST",
-  "encryptedWhitelist": "YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUE2i0D49jRXFoceme9jEc5lg==",
-  "encryptedLogBlob": "bG1ub3BxcnN0dXZ3V4FtGiCXVi+oXG3ZU3D5qKDCHfMaxoLIgSuQeCXe/hSpqQEqLeySa8va2QgGF0FqY0mEwOO7DJYhXHEeciok0zUKPf3UbQ7xDttzB17ISbkSJ/Ym/rKKerLK3u9tHixKT3PMhA84IrJjgl/cVal/rrAR849AC1kNKfO2dBKKRUHD5KQ="
+  "encryptedWhitelist": "YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUEUtJjgxb9XKaJ6Lsp4f17Nw==",
+  "encryptedLogBlob": "bG1ub3BxcnN0dXZ3V4FtGiCXVi+oXG3ZU3D5qKDCHfMaxoLIgSuQeDPN6ljnvhcqCOuUcufSkkFQBiYpYhzFk7C0RYx8WyhOKSI1xHZ/bK+cPRzpFsQlBVjFT6lWavpz862bcaqBl7kYWmdLWXrX1UE6NK1okU/QX+on46ZW+qRYAG/jOQCrpr0//hPQSVjPtDEBvgkFpXrCnfzpPJfQHfq6ftDdcnNchLTCnH6ldEM4jAnSaXdJxWeD+o80ebWC3T3HLxPlMA=="
 }
 ```
 
 ##### LOG_ACTION
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"PSBT Downloaded","detail":"Unsigned file exported","user":"Guest (ABCD)"}
-* **encryptedLogBlob IV (Hex)**: 78797a7b7c7d7e7f80818283
-* **encryptedLogBlob Output (Base64)**: eHl6e3x9fn+AgYKDkZ6EVhDiYoPOinszPtfPnwQ2lGb5MX62zEXx6uofLemeUURFx0BqVqPEhv7obgnAQ3fNxVxt1kp8LgPGTXjEdDxasF6B6mjF9fM+wVnoWS0bd1RIIVgVk+tsnFDK67bjoxlepbiKEKx4qcKJLPL4ZnaUZrIAD3bq7CuDe5s=
+
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":2,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"PSBT Downloaded","detail":"Unsigned file exported","user":"Guest (ABCD)"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `78797a7b7c7d7e7f80818283`
+- **encryptedLogBlob Output (Base64)**: `eHl6e3x9fn+AgYKDkZ6EVhDiYoPOinszPtfPnwQ2lGb5MX62zEXx6vwMOaXQQVJF5XxHb8rky7OkM1SSQiac0Udi1xcxLUebXSbVDDMd7A/Cuz7TpatmlU65EW1EJwwPIAxc3+o9wwC4gtbw9jhCpvbOPo9fiI+Jfegu/dNWecDVwHrFLoBBkPhmQV4tRQYpchmniLBtOdm6dGyyIosesZpsZy6D3Vq+iX+XKMRDOF88e8FBNCtIsxJqh03JEmx08A==`
+
 ```json
 {
   "type": "LOG_ACTION",
-  "encryptedLogBlob": "eHl6e3x9fn+AgYKDkZ6EVhDiYoPOinszPtfPnwQ2lGb5MX62zEXx6uofLemeUURFx0BqVqPEhv7obgnAQ3fNxVxt1kp8LgPGTXjEdDxasF6B6mjF9fM+wVnoWS0bd1RIIVgVk+tsnFDK67bjoxlepbiKEKx4qcKJLPL4ZnaUZrIAD3bq7CuDe5s="
+  "encryptedLogBlob": "eHl6e3x9fn+AgYKDkZ6EVhDiYoPOinszPtfPnwQ2lGb5MX62zEXx6vwMOaXQQVJF5XxHb8rky7OkM1SSQiac0Udi1xcxLUebXSbVDDMd7A/Cuz7TpatmlU65EW1EJwwPIAxc3+o9wwC4gtbw9jhCpvbOPo9fiI+Jfegu/dNWecDVwHrFLoBBkPhmniLBtOdm6dGyyIosesZpsZy6D3Vq+iX+XKMRDOF88e8FBNCtIsxJqh03JEmx08A=="
 }
 ```
 
 ##### TX_FINALIZED
-* **encryptedFinalTxHex Plaintext**: "0200000000010153ae6e073b..."
-* **encryptedFinalTxHex IV (Hex)**: 8485868788898a8b8c8d8e8f
-* **encryptedFinalTxHex Output (Base64)**: hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqWXey3kNvNBd+69akuHxAmA==
-* **encryptedFinalTxId Plaintext**: "6698923ed3153ddb30b96bff7924f47f67e184d243e5bc57098166967c193ce3"
-* **encryptedFinalTxId IV (Hex)**: 909192939495969798999a9b
-* **encryptedFinalTxId Output (Base64)**: kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv9449uilLKrhojRGxMGj3mk=
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Tx Finalized","detail":"Signatures merged successfully","user":"Coordinator"}
-* **encryptedLogBlob IV (Hex)**: 9c9d9e9fa0a1a2a3a4a5a6a7
-* **encryptedLogBlob Output (Base64)**: nJ2en6ChoqOkpaanfLL7ZjeGq7WbhsM5KCHWYcmDjUY2Hp1WDPbZ9E/vm132F7wDO3Srqq8C6Lrq9ZmDdHDJjtqOt/sWN6Gw6HXr8SogTRxBVUeEyKfa0SRq9TbcV1F5x741I3D/SjBDRxLr4DICH8eEYm3Nw+Mh4OiBAgYYiv5kvFtKxcevT6klvi0z
+
+- **encryptedFinalTxHex Plaintext**: `"0200000000010153ae6e073b..."`
+- **encryptedFinalTxHex AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:final_hex"`
+- **encryptedFinalTxHex IV (Hex)**: `8485868788898a8b8c8d8e8f`
+- **encryptedFinalTxHex Output (Base64)**: `hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqNDMjHwzrs1KFZODYVZEbAg==`
+- **encryptedFinalTxId Plaintext**: `"6698923ed3153ddb30b96bff7924f47f67e184d243e5bc57098166967c193ce3"`
+- **encryptedFinalTxId AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:final_txid"`
+- **encryptedFinalTxId IV (Hex)**: `909192939495969798999a9b`
+- **encryptedFinalTxId Output (Base64)**: `kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv4ShTTaF78GGjJYr7RztIgg=`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":6,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Tx Finalized","detail":"Signatures merged successfully","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `9c9d9e9fa0a1a2a3a4a5a6a7`
+- **encryptedLogBlob Output (Base64)**: `nJ2en6ChoqOkpaanfLL7ZjeGq7WbhsM5KCHWYcmDjUY2Hp1WDPbZ9Fn8jxG4A6oDHWPkgY8Iq+yhvs7UM2je3IjXs6pDd7ajiXi/sipgDVgJElXfm+SJhXd+tnOPFhgo0a4lIWikUj41SkHI+35ZUe2RaHuLhq8k8fOSSRcQ64jaZCIjKDsb1SUZ3P/Prq1jAiAgAA67vR1UhXtYIxw385kUcrDQIB7p5lRlu2tMW+XyhOKQoVZ9v7dcUY/2XNwaGYh5uZY=`
+
 ```json
 {
   "type": "TX_FINALIZED",
-  "encryptedFinalTxHex": "hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqWXey3kNvNBd+69akuHxAmA==",
-  "encryptedFinalTxId": "kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv9449uilLKrhojRGxMGj3mk=",
-  "encryptedLogBlob": "nJ2en6ChoqOkpaanfLL7ZjeGq7WbhsM5KCHWYcmDjUY2Hp1WDPbZ9E/vm132F7wDO3Srqq8C6Lrq9ZmDdHDJjtqOt/sWN6Gw6HXr8SogTRxBVUeEyKfa0SRq9TbcV1F5x741I3D/SjBDRxLr4DICH8eEYm3Nw+Mh4OiBAgYYiv5kvFtKxcevT6klvi0z"
+  "encryptedFinalTxHex": "hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqNDMjHwzrs1KFZODYVZEbAg==",
+  "encryptedFinalTxId": "kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv4ShTTaF78GGjJYr7RztIgg=",
+  "encryptedLogBlob": "nJ2en6ChoqOkpaanfLL7ZjeGq7WbhsM5KCHWYcmDjUY2Hp1WDPbZ9Fn8jxG4A6oDHWPkgY8Iq+yhvs7UM2je3IjXs6pDd7ajiXi/sipgDVgJElXfm+SJhXd+tnOPFhgo0a4lIWikUj41SkHI+35ZUe2RaHuLhq8k8fOSSRcQ64jaZCIjKDsb1SUZ3P/Prq1jAiAgAA67vR1UhXtYIxw385kUcrDQIB7p5lRlu2tMW+XyhOKQoVZ9v7dcUY/2XNwaGYh5uZY="
 }
 ```
 
 ##### PARTICIPANTS_UPDATE
-* **participantName Plaintext**: "Charlie (Coldcard)"
-* **participantName IV (Hex)**: a8a9aaabacadaeafb0b1b2b3
-* **participantName Output (Base64)**: qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw==
+
+- **participantName Plaintext**: `"Charlie (Coldcard)"`
+- **participantName AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:display_name"`
+- **participantName IV (Hex)**: `a8a9aaabacadaeafb0b1b2b3`
+- **participantName Output (Base64)**: `qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIfbtxsJH5oCNtG71836ifzw==`
+
 ```json
 {
   "type": "PARTICIPANTS_UPDATE",
@@ -973,7 +1052,7 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
     "ABCD": {
       "id": "ABCD",
       "role": "admin",
-      "encryptedDisplayName": "qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw=="
+      "encryptedDisplayName": "qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIfbtxsJH5oCNtG71836ifzw=="
     },
     "EFGH": {
       "id": "EFGH",
@@ -984,26 +1063,64 @@ All ciphertexts below are encoded in Base64 as the exact concatenation of IV + C
 ```
 
 ##### UPDATE_ADDRESS_LABEL
-* **address Plaintext**: "tb1qww078psjaee79gh0cfrqpf6gtzvxzk7gcfs869vnxtruhj6xj03qjfdnh8"
-* **address Output (Blinded)**: dae9a63e7eb0bfc8
-* **label Plaintext**: "Corporate Treasury"
-* **label IV (Hex)**: d8d9dadbdcdddedfe0e1e2e3
-* **label Output (Base64)**: 2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4Kun2VV54po1UHgck6Q064Q==
-* **encryptedLogBlob Plaintext**: {"timestamp":1710000000000,"event":"Address Label Updated","detail":"Corporate Treasury (tb1qww07...)","user":"Coordinator"}
-* **encryptedLogBlob IV (Hex)**: e4e5e6e7e8e9eaebecedeeef
-* **encryptedLogBlob Output (Base64)**: 5OXm5+jp6uvs7e7vFiSypM13FyX4KGFl3KOodoc7v9ZvKyTh1S32Q3iUu/GQcs5CJXsJKzT4lFTncQCGwe7vHovEpUuwISMVSO+q1GB6qk9firEKHe69EVz0NbnAvU5Q/mgPfyvOnIQKY2ljKNVPzebj0YkDyIVVMfSyXwZDqcoVXhdRoVX0jfmQTfx62J+ERxfJLBJS3Js=
+
+- **address Plaintext**: `"tb1qww078psjaee79gh0cfrqpf6gtzvxzk7gcfs869vnxtruhj6xj03qjfdnh8"`
+- **address Output (Blinded)**: `dae9a63e7eb0bfc8`
+- **label Plaintext**: `"Corporate Treasury"`
+- **label AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:address_label:dae9a63e7eb0bfc8"`
+- **label IV (Hex)**: `d8d9dadbdcdddedfe0e1e2e3`
+- **label Output (Base64)**: `2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4swfmfRV7u+yMycM0cAhPrg==`
+- **encryptedLogBlob Plaintext**: `{"timestamp":1710000000000,"seq":7,"roomId":"123e4567-e89b-12d3-a456-426614174000","event":"Address Label Updated","detail":"Corporate Treasury (tb1q...dnh8)","user":"Coordinator"}`
+- **encryptedLogBlob AAD**: `"room:123e4567-e89b-12d3-a456-426614174000|field:audit_log"`
+- **encryptedLogBlob IV (Hex)**: `e4e5e6e7e8e9eaebecedeeef`
+- **encryptedLogBlob Output (Base64)**: `5OXm5+jp6uvs7e7vFiSypM13FyX4KGFl3KOodoc7v9ZvKyTh1S32Q26Hr73eZ9hCFnACNBjvxU6JIVDQyPqPWNiItBbtYSIGHu7tmGgivUNQ/exOW7D7QR+lJd2C+gMB7mwTMXeYxJc6cHoheogSw4Ogn84am7VXd6/keQ0O94wYVQJEp0v0ysbFuEkbnT1s6kBSmdZlQJ3F+YW/ebow6ABcc5+VdyaDwAwnBoaqRyHnrPCn3VvzK7NHJEu5ef87EpIvDljkbHRAL87zuGJzcA==`
+
 ```json
 {
   "type": "UPDATE_ADDRESS_LABEL",
   "blindedAddress": "dae9a63e7eb0bfc8",
-  "label": "2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4Kun2VV54po1UHgck6Q064Q==",
-  "encryptedLogBlob": "5OXm5+jp6uvs7e7vFiSypM13FyX4KGFl3KOodoc7v9ZvKyTh1S32Q3iUu/GQcs5CJXsJKzT4lFTncQCGwe7vHovEpUuwISMVSO+q1GB6qk9firEKHe69EVz0NbnAvU5Q/mgPfyvOnIQKY2ljKNVPzebj0YkDyIVVMfSyXwZDqcoVXhdRoVX0jfmQTfx62J+ERxfJLBJS3Js="
+  "label": "2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4swfmfRV7u+yMycM0cAhPrg==",
+  "encryptedLogBlob": "5OXm5+jp6uvs7e7vFiSypM13FyX4KGFl3KOodoc7v9ZvKyTh1S32Q26Hr73eZ9hCFnACNBjvxU6JIVDQyPqPWNiItBbtYSIGHu7tmGgivUNQ/exOW7D7QR+lJd2C+gMB7mwTMXeYxJc6cHoheogSw4Ogn84am7VXd6/keQ0O94wYVQJEp0v0ysbFuEkbnT1s6kBSmdZlQJ3F+YW/ebow6ABcc5+VdyaDwAwnBoaqRyHnrPCn3VvzK7NHJEu5ef87EpIvDljkbHRAL87zuGJzcA=="
 }
 ```
 
 ### Message Payload Vectors (Relay-to-Client)
 
-The Relay acts strictly as an aggregator and router. It does not encrypt data. The STATE_SYNC and CONNECTIONS_UPDATE vectors below demonstrate how the server stores and broadcasts the exact opaque ciphertexts uploaded by the clients in the vectors above.
+The Relay acts strictly as an aggregator, hash-chain notary, and router. It does not encrypt or decrypt payload data. The vectors below demonstrate how the server issues session resumption secrets, chains audit envelopes via SHA-256, and broadcasts the exact opaque ciphertexts uploaded by clients in the vectors above.
+
+##### SESSION_CONNECTED
+Demonstrates how the relay privately issues a 256-bit resumeToken upon connection while storing only its SHA-256 hash internally.
+- **Issued resumeToken (256-bit Hex)**: `a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90`
+- **Stored Relay resumeTokenHash (SHA-256, never broadcast)**: `79175e70eb2236876b0c003be58294690c0e36b44c0947ae80f599ea9d039833`
+
+```json
+{
+  "type": "SESSION_CONNECTED",
+  "sessionId": "ABCD",
+  "resumeToken": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+}
+```
+
+##### LOG_UPDATE (Incremental Hash-Chained Envelope)
+Demonstrates how the relay chains each appended audit log envelope using SHA-256 so clients can verify log integrity and detect truncation or reordering.
+- **Genesis Previous Hash**: `0000000000000000000000000000000000000000000000000000000000000000`
+- **Preimage**: "0000000000000000000000000000000000000000000000000000000000000000|0|1710000000500|ABCD|guest|DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl7Nx81BqEB4Gj2paE9dh38G2Tu/MhZfEHW4r7n9dAz31u98i1bSPhEo6RliJUAj0gH/BArePiKmCXrx/P9apTwk1NbR4zER37jGC/AdC+9HyK6XZ2quPwt8+acDREeTOASwonZMcZ+zVweS8CnhFIjWIn+yX7ZurAUF/OMp7FKhbzLHoe+uUkMMNkfffGnGPPUznqbntGQ=="
+- **Resulting chainHash (SHA-256)**: `d532dd5a168537f7bfd8278d174acb6814ac10bff1793060d8c34b8d36a1e3cf`
+
+```json
+{
+  "type": "LOG_UPDATE",
+  "entry": {
+    "seq": 0,
+    "serverTimestamp": 1710000000500,
+    "sessionId": "ABCD",
+    "role": "guest",
+    "blob": "DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl7Nx81BqEB4Gj2paE9dh38G2Tu/MhZfEHW4r7n9dAz31u98i1bSPhEo6RliJUAj0gH/BArePiKmCXrx/P9apTwk1NbR4zER37jGC/AdC+9HyK6XZ2quPwt8+acDREeTOASwonZMcZ+zVweS8CnhFIjWIn+yX7ZurAUF/OMp7FKhbzLHoe+uUkMMNkfffGnGPPUznqbntGQ==",
+    "chainHash": "d532dd5a168537f7bfd8278d174acb6814ac10bff1793060d8c34b8d36a1e3cf"
+  },
+  "chainHead": "d532dd5a168537f7bfd8278d174acb6814ac10bff1793060d8c34b8d36a1e3cf"
+}
+```
 
 ##### CONNECTIONS_UPDATE
 Demonstrates how the relay broadcasts the encryptedDisplayName without being able to read its contents.
@@ -1014,12 +1131,12 @@ Demonstrates how the relay broadcasts the encryptedDisplayName without being abl
   "count": 2,
   "sessions": [
     {
-      "id": "a1b2c3d4",
+      "id": "ABCD",
       "role": "admin",
-      "encryptedDisplayName": "MDEyMzQ1Njc4OTo7WVOKPIr7HvDsNFdO0LXrLlLr32OLRZHne84CHoLv"
+      "encryptedDisplayName": "MDEyMzQ1Njc4OTo7WVOKPIr7HvDsNFdO0LXNyShXDfxUZcq6S3uW7p6k"
     },
     {
-      "id": "e5f6g7h8",
+      "id": "EFGH",
       "role": "guest"
     }
   ]
@@ -1038,57 +1155,69 @@ Echoes the blind policy blob back to the authenticated client for decryption and
 ```
 
 #### STATE_SYNC (Server-to-Client Aggregation)
-Note: adminToken and roleTokens are stripped from this payload before broadcasting
+Note: adminToken, roleTokens, nonceOwners, signatureOwners, logCounts, and participant resumeTokenHash values are stripped from this payload before broadcasting.
+
 ```json 
 {
   "type": "STATE_SYNC",
   "roomId": "123e4567-e89b-12d3-a456-426614174000",
+  "protocol": "standard",
   "network": "bitcoin",
-  "roomName": "PD0+P0BBQkNERUZHApT2Gnt86Im5Dp5eT8Hwclxpiwq4EpmB5Qq54wkY5ZNKYc3iej0=",
-  "encryptedPsbt": "AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRXCFKWQvVzkwe4ujHioDt10=",
+  "roomName": "PD0+P0BBQkNERUZHApT2Gnt86Im5Dp5eT8Hwclxpiwq4ErteZDvpDM4nnDUQa7LJxPI=",
+  "encryptedPsbt": "Njc4OTo7PD0+P0BBO7A+q/MaTQ48R5+8r5I6AYnRbJT3ns+ftJGh8BLYRv1Qxcw0c4jXcAZlrLyop1aIs9X3JtoMyrInVhuZ",
+  "transientPsbt": null,
+  "nonces": [],
   "signatures": [
-    "AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRXCFKWQvVzkwe4ujHioDt10="
+    "AAECAwQFBgcICQoL2O7bT0SuPju/LK6HYSiJ4oDoRT8zCWAGBYYYFGtVnQlXo1I="
   ],
   "isLocked": true,
   "auditLog": [
-    "DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl6Vi5xwkAwgGrmxSEP9xiInxX4iPjMyQTzxiqWtGBXWw6NJ92u+Z4hVwHA/NXBmh13yXAraMzqeMGb9pNNCpTwkhKbZl2RAq3Rbh7V4M6QRwfL4cQdO53zYKrPPZYEI="
+    {
+      "seq": 0,
+      "serverTimestamp": 1710000000500,
+      "sessionId": "ABCD",
+      "role": "guest",
+      "blob": "DA0ODxAREhMUFRYX612JiwPP7EmQvnGcmvOxURTWp8kNSC8Ejv8bl7Nx81BqEB4Gj2paE9dh38G2Tu/MhZfEHW4r7n9dAz31u98i1bSPhEo6RliJUAj0gH/BArePiKmCXrx/P9apTwk1NbR4zER37jGC/AdC+9HyK6XZ2quPwt8+acDREeTOASwonZMcZ+zVweS8CnhFIjWIn+yX7ZurAUF/OMp7FKhbzLHoe+uUkMMNkfffGnGPPUznqbntGQ==",
+      "chainHash": "d532dd5a168537f7bfd8278d174acb6814ac10bff1793060d8c34b8d36a1e3cf"
+    }
   ],
+  "auditChainHead": "d532dd5a168537f7bfd8278d174acb6814ac10bff1793060d8c34b8d36a1e3cf",
   "signerLabels": {
-    "07877d968ee881d3": "GBkaGxwdHh8gISIjkojJaZC67eSRQZkvuALVzm565NRSdgpjQQ=="
+    "07877d968ee881d3": "GBkaGxwdHh8gISIjkojJaZC67eSR8VG+BGTGBLeYMoBYi4giDA=="
   },
   "addressLabels": {
-    "dae9a63e7eb0bfc8": "2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4Kun2VV54po1UHgck6Q064Q=="
+    "dae9a63e7eb0bfc8": "2Nna29zd3t/g4eLjgBGyABXrWyc5qPFQMPq6Vrc4swfmfRV7u+yMycM0cAhPrg=="
   },
-  "whitelist": "YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUE2i0D49jRXFoceme9jEc5lg==",
+  "whitelist": "YGFiY2RlZmdoaWprjYaFId7HyuhIllE5ZO9sZIbQaFFNRf6J8fsoXJWRHB2RMb+FCDLuHfplebtxlR1ha6PfiQG7ct0lY5j9gDnBduTZIdKKduUEUtJjgxb9XKaJ6Lsp4f17Nw==",
   "participants": {
     "ABCD": {
       "id": "ABCD",
       "role": "admin",
-      "encryptedDisplayName": "qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIAPZhWgQXwzDcSeEIyWN0Yw=="
+      "encryptedDisplayName": "qKmqq6ytrq+wsbKzTWCmLc0amxYCsvjQ1TLRUwgIfbtxsJH5oCNtG71836ifzw=="
     },
     "EFGH": {
       "id": "EFGH",
       "role": "guest"
     }
   },
-  "encryptedFinalTxHex": "hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqWXey3kNvNBd+69akuHxAmA==",
-  "encryptedFinalTxId": "kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv9449uilLKrhojRGxMGj3mk=",
+  "encryptedFinalTxHex": "hIWGh4iJiouMjY6Po6bGWQcaR/ydWIq+MUMWlJ9eTJREBntkwsnqNDMjHwzrs1KFZODYVZEbAg==",
+  "encryptedFinalTxId": "kJGSk5SVlpeYmZqbk+ovJ16rTnsYtqlmFlU2aZOtpvQ7Uf71N10QjsDofckiVpYDHQTxgngtfEPR9UYiWvEHNX7ZcIX4BtB6mhkFv4ShTTaF78GGjJYr7RztIgg=",
   "connectedCount": 2,
-  "protocolVersion": "1.0.0"
+  "protocolVersion": "2.0.0"
 }
 ```
 
 ## Recommended Relay Configurations
 To maintain the security and privacy promises of the BIP, relay operators SHOULD adhere to these infrastructure guidelines.
 
-### Stateless Environment
-Relays SHOULD be hosted in serverless or "edge" environments (such as Cloudflare Workers or AWS Lambda) where room state is kept in volatile memory.
-* **No Persistent DB**: Avoid writing encrypted PSBTs to traditional disk-based databases.
-* **Memory Isolation**: Use isolated session objects (like Durable Objects) to prevent data leakage between rooms.
+### Ephemeral Environment
+Relays SHOULD be hosted in isolated edge or serverless environments (such as Cloudflare Durable Objects or self-hosted workerd instances configured with inMemory volatile storage) where room state is isolated per session.
+* **No Long-Term Database**: Avoid writing encrypted PSBTs to traditional long-lived databases.
+* **Memory & Session Isolation**: Use isolated session objects to prevent state leakage between rooms.
 
-### Retention and Self-Destruct
+### Retention, Self-Destruct, and Tombstones
 * **Maximum TTL**: Rooms SHOULD have a maximum lifespan of 24 hours.
-* **Explicit Purge:**: Upon receiving a `CLOSE_ROOM` message from the Coordinator, the relay MUST immediately wipe the room state and all associated audit logs.
+* **Explicit Purge:**: Upon receiving a CLOSE_ROOM message from the Coordinator or reaching the 24-hour TTL alarm, the relay MUST immediately purge all encrypted room state and audit logs and write a minimal 28-byte timestamp tombstone ({ closedAt }) for 1 hour (410 Gone) to prevent closed room IDs from being re-initialized.
 
 ### Security Headers and Origin Controls
 Relay APIs MUST enforce strict security headers and multi-layered defense.
@@ -1098,33 +1227,35 @@ Relay APIs MUST enforce strict security headers and multi-layered defense.
 ## Security Considerations
 This section analyzes the threat model and the cryptographic guarantees provided by the protocol.
 
-### Zero-Knowledge Property
-The relay server acts as a "Blind Relay". Because the encryption key (FBEK) is stored only in the URI fragment and never transmitted to the server, the relay operator cannot:
-* Decrypt the base PSBT or any partial signatures.
+### Operator-Blind E2EE & Context Binding
+The relay server acts as an operator-blind router ("Blind Relay"). Because the encryption key (FBEK) is stored only in the URI fragment and never transmitted to the server, and because every encrypted field is bound to its roomId and fieldType via AES-GCM-256 Additional Authenticated Data (AAD), the relay operator cannot:
+* Decrypt the base PSBT, public nonces, or any partial signatures.
 * Learn the addresses, amounts, or signer identities within the transaction.
-* Mathematically forge a signature or alter the transaction without breaking AES-GCM-256 integrity.
+* Mathematically forge a signature, alter the transaction, or substitute ciphertexts across fields or rooms without failing AES-GCM-256 authentication tag verification.
+* Truncate, evict, or reorder audit log records without breaking the running SHA-256 chainHash verified by clients.
 
 ### Authorization Boundaries
 The protocol distinguishes between "Coordinators" and "Guests".
 * **Room Security**: The `adminToken` is encrypted with the FBEK before the initial upload. This ensures only the party possessing the fragment key can claim administrative control of the room.
-* **Role Hijacking Mitigation**: The relay MUST NOT include the `adminToken`, raw role tokens, or registered role constraints in the `STATE_SYNC` payload sent to clients. This ensures malicious actors cannot scrape active capability tokens from the initial room state to elevate their privileges.
-* **Finalization Control**: Only the coordinator is permitted to send TX_FINALIZED messages, ensuring guests cannot prematurely declare completion or distribute potentially invalid final transactions.
-* **Granular Role-Based Access Control (RBAC)**: Coordinators MAY define specific capability boundaries for guests via `REGISTER_ROLE`. The relay enforces hard structural limits (e.g., rejecting `UPLOAD_PARTIAL` if the role restricts it). The client independently enforces granular UI and privacy constraints (e.g., blurring UTXOs or restricting PDF downloads) by decrypting the associated `policyBlob`.
+* **Role & Session Hijacking Mitigation**: The relay MUST NOT include `adminToken`, `roleTokens`, slot-ownership maps, or participant `resumeTokenHash` digests in the `STATE_SYNC` or `PARTICIPANTS_UPDATE` payloads sent to clients. Reclaiming an existing `sessionId` requires presenting the 256-bit `resumeToken` issued privately at initial connection.
+* **First-Writer-Wins Signer Slot Ownership**: In default rooms, the relay binds each uploaded `fingerprint` slot in `nonces` and `signatures` to the `sessionId` that first populated it. Subsequent attempts by any other guest session to overwrite that slot are rejected with `ERROR_POLICY_VIOLATION` unless overridden by the Coordinator `(role === 'admin')`.
+* **Finalization Control**: Only the coordinator is permitted to send `PUBLISH_AGGREGATE_PSBT` and `TX_FINALIZED` messages, ensuring guests cannot prematurely transition signing rounds or declare completion.
+* **Granular Role-Based Access Control (RBAC)**: Coordinators MAY define specific capability boundaries for guests via `REGISTER_ROLE`. The relay enforces hard structural limits (e.g., rejecting `UPLOAD_NONCE` or `UPLOAD_PARTIAL` if the role restricts it). The client independently enforces granular UI and privacy constraints (e.g., blurring UTXOs or restricting PDF downloads) by decrypting the associated `policyBlob`.
 * **Least Privilege Fallback**: Clients MUST enforce a least-privilege fallback if a valid role token is missing from the connection parameters.
-* **Brute Force Mitigation (IP Banning)**: Relays MUST implement an authentication lockout mechanism to prevent brute-force discovery of decryption keys or role tokens. If a client provides an invalid `adminToken` or `RoleToken` multiple times (RECOMMENDED: 5 attempts), the relay MUST drop the connection and temporarily ban the offending IP address (RECOMMENDED: 30 minutes). The relay MUST NOT lock the room itself, ensuring the session remains fully accessible to legitimate signers.
+* **Brute Force Mitigation (IP & Session Lockout)**: Relays MUST implement an authentication lockout mechanism to prevent brute-force discovery of admin or role tokens. If a client provides an invalid `adminToken` or `RoleToken` multiple times (RECOMMENDED: 5 attempts), the relay MUST reject further attempts with an `ERROR` message and temporarily lock out the offending client IP address (or the specific `sessionId` when no trusted client IP is available) for a cooldown period (RECOMMENDED: 30 minutes). The relay MUST NOT lock the room itself, ensuring the session remains accessible to legitimate signers.
 
 ### Denial of Service (DoS) Protections
 Relay operators SHOULD implement a multi-layered defense-in-depth strategy to ensure high availability and prevent resource exhaustion.
 
 * **Infrastructure-Layer Protection (WAF)**: Relays SHOULD utilize an edge-layer Web Application Firewall (WAF). This MUST include rate-limiting rules at the network edge to block malicious traffic and automated scrapers before they reach the application logic.
-* **Initialization Rate Limiting**: Relays SHOULD enforce strict limits on the POST /api/room endpoint (e.g., RECOMMENDED: 60 requests per minute per IP) to prevent "Room Flooding" attacks that exhaust RAM.
-* **Concurrent Connection Limits**: The Relay MUST track and limit concurrent WebSocket connections on a per-IP basis (RECOMMENDED: 10 connections per IP). If the limit is reached, subsequent upgrade requests SHOULD be rejected with an HTTP 429 status.
-* **Message Frequency Throttling**: Once a socket is established, the relay SHOULD enforce a per-session message rate limit (RECOMMENDED: 10 messages per second). Violations SHOULD result in the session being terminated with a 4008 Policy Violation status.
-* **Payload Size Constraints**: To protect against memory-based attacks, the Relay MUST enforce a strict maximum size for any individual message (RECOMMENDED: 2,097,152 bytes or 2MB).
-* **Origin Access Control (CORS)**: Relays MUST enforce strict Cross-Origin Resource Sharing (CORS) policies. In production environments, the Access-Control-Allow-Origin header SHOULD be restricted to authorized client domains to prevent cross-site request forgery and unauthorized API usage.
+* **Initialization Rate Limiting**: Relays SHOULD enforce strict limits on the POST /api/room endpoint (e.g., RECOMMENDED: 60 requests per minute per IP) to prevent "Room Flooding" attacks.
+* **Concurrent Connection Limits**: The Relay MUST track and limit concurrent WebSocket connections on a per-IP basis (RECOMMENDED: 10 connections per IP, decremented cleanly upon socket close or verified session replacement). If the limit is reached, subsequent upgrade requests SHOULD be rejected with an HTTP 429 status.
+* **Message Frequency Throttling**: Once a socket is established, the relay SHOULD enforce a per-session message rate limit (RECOMMENDED: 10 messages per second). Relays SHOULD notify the client via a rate-limit error frame on the first offending message in a window and drop subsequent excess messages without terminating the socket.
+* **Payload & Room State Size Constraints**: To protect against memory-based and storage-exhaustion attacks, the Relay MUST enforce a strict maximum size for any individual message (RECOMMENDED: 2,097,152 bytes or 2MB), a total serialized room state byte budget (RECOMMENDED: 5,242,880 bytes or 5MB), and non-evicting audit log caps (RECOMMENDED: 2,000 total entries per room with the final 50 slots reserved for Coordinator lifecycle events, and 150 `LOG_ACTION` entries per guest session).
+* **Origin Access Control (CORS)**: Relays MUST enforce strict Cross-Origin Resource Sharing (CORS) policies. In production environments, the `Access-Control-Allow-Origin` header SHOULD be restricted to authorized client domains to prevent cross-site request forgery and unauthorized API usage.
 
 #### Metadata Leakage
-While the transaction data is encrypted, participants should be aware that the relay can see connection metadata like public IP addresses and timing analysis of uploads. Users requiring higher privacy should access the relay via Tor or a VPN.
+While the transaction data is encrypted, participants should be aware that the relay processes transient connection metadata like public IP addresses in memory for rate-limiting and abuse prevention. Users requiring higher network anonymity should access the relay via Tor or a VPN.
 
 ## Reference Implementation
 A fully functional, production-ready reference implementation of this stateless WebSocket standard is currently maintained under AGPLv3.
